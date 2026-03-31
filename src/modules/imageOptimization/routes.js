@@ -1,10 +1,8 @@
 const { optimizeImage } = require("./controller");
 
 async function imageOptimizationRoutes(app) {
-  app.post("/getImageList", async (req, reply) => {
-    const result = await optimizeImage(req);
-    return reply.send(result);
-  });
+  app.post("/get-all-products", optimizeImage);
+
 
   app.get("/hello", async () => {
     return { ok: true, message: "image-optimizer is up" };
@@ -12,3 +10,4 @@ async function imageOptimizationRoutes(app) {
 }
 
 module.exports = { imageOptimizationRoutes };
+

@@ -76,7 +76,7 @@ exports.installApp = async (req, reply) => {
     return reply.redirect(
       `https://store-${storeHash}.mybigcommerce.com/manage/app/${process.env.BIG_COMMERCE_APP_ID}`
     );
-    console.log("endddd")
+  
   } catch (err) {
 
     console.error("[STORE-CONTROLLER] Install app failed:", {

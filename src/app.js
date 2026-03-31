@@ -27,7 +27,7 @@ async function buildApp() {
   });
   registerRequestLogging(app);
 
-  await app.register(imageOptimizationRoutes, { prefix: "/image-optimizer" });
+  await app.register(imageOptimizationRoutes, { prefix: "/api/image-optimizer" });
   await app.register(installationRoutes, { prefix: "/big-commerce" });
 
   return app;
