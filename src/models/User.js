@@ -26,6 +26,17 @@ const UserSchema = new mongoose.Schema(
     store_id: {
       type: String,
     },
+    store_name: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+    currency: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      default: null,
+    },
     access_token: {
       type: String,
       default: null,
@@ -58,6 +69,12 @@ const UserSchema = new mongoose.Schema(
     primaryDomain: {
       type: String,
       lowercase: true,
+      trim: true,
+      default: null,
+    },
+    /** Storefront URL from BigCommerce (secure_url at install) */
+    storeUrl: {
+      type: String,
       trim: true,
       default: null,
     },
