@@ -91,6 +91,9 @@ const bulkImageOptimizationSchema = {
         shop: { type: "string" },
         channel_id: { type: ["integer", "string"] },
         store_id: { type: "string" },
+        sort_order: { type: ["integer", "string"] },
+        is_thumbnail: { type: ["boolean", "string"] },
+      
       },
     },
   },
@@ -105,6 +108,7 @@ const bulkImageOptimizationAllSchema = {
   },
 };
 
+/** Same catalog row shape as bulk-image-optimization; image_url is optional for restore. */
 const bulkRestoreSchema = {
   body: {
     type: "array",
@@ -115,7 +119,10 @@ const bulkRestoreSchema = {
       properties: {
         image_id: { type: ["integer", "string"] },
         product_id: { type: ["integer", "string"] },
+        image_url: { type: "string" },
         shop: { type: "string" },
+        channel_id: { type: ["integer", "string"] },
+        store_id: { type: "string" },
         imageName: { type: "string" },
         image_name: { type: "string" },
         altText: { type: "string" },
@@ -156,8 +163,10 @@ const restoreImageSchema = {
       },
       image_url: {
         type: "string",
-        minLength: 1,
       },
+      shop: { type: "string" },
+      channel_id: { type: ["integer", "string"] },
+      store_id: { type: "string" },
       imageName: { type: "string" },
       image_name: { type: "string" },
       altText: { type: "string" },

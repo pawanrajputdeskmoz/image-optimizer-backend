@@ -492,6 +492,15 @@ async function restoreSingleImage({
     }
   );
 
+  const oldAltText = imageOldData?.altText ?? null;
+  const oldImageName = imageOldData?.imageName ?? null;
+  const size =
+    Number(imageOldData?.original?.size) > 0
+      ? Number(imageOldData.original.size)
+      : Number(originalStat?.size) > 0
+        ? Number(originalStat.size)
+        : null;
+
   return {
     success: true,
     error: null,
@@ -503,6 +512,9 @@ async function restoreSingleImage({
       product_id: Number(productId),
       restored_image_url: restoredBcUrl,
       backup_retention_days: RESTORE_BACKUP_DAYS,
+      old_alt_text: oldAltText,
+      old_image_name: oldImageName,
+      size,
     },
   };
 }

@@ -25,6 +25,8 @@ const {
   getOptimizationJobStatus,
   buildJobImageMeta,
   fetchAllCatalogImagesInChunks,
+  placementFieldsForJobItem,
+  syncQueuedJobItemPlacements,
   createRestoreJob,
   writeRestoreLogs,
   getRestoreJobStatus,
@@ -45,12 +47,10 @@ const { performance } = require("perf_hooks");
 
 
 //=======================================================
-// Fetch all products
+// API Controllers
 //=======================================================
 
-
-
-
+// --- Catalog ---
 exports.fetchAllProducts = async (req, reply) => {
   const apiStart = performance.now();
 
@@ -477,10 +477,7 @@ exports.getPreviewImgData = async (req, reply) => {
 
 
 
-//=======================================================
-// Single Image Optimization
-//=======================================================
-
+// --- Image optimization (single → multiple → bulk) ---
 exports.singleImageOptimization = async (req, reply) => {
   const singleJobUuid = crypto.randomUUID();
   let storeHash;
@@ -651,6 +648,8 @@ exports.singleImageOptimization = async (req, reply) => {
       ...body,
     });
 
+    console.log("getting this in placement", placement);
+
     // Metadata-only (filename / alt templates, no compression)
     if (!runOptimize) {
       const metadataPayload = { ...placement };
@@ -778,8 +777,352 @@ exports.singleImageOptimization = async (req, reply) => {
   }
 };
 
+/** Checkbox-selected images → job_type `checkBox` */
+exports.bulkImageOptimizationCheckbox = (req, reply) =>
+  queueBulkImageJobs(req, reply, "checkBox");
+
+/** Full-store: fetch all BC product images (chunked) → queue job_type `bulk` */
+exports.bulkImageOptimization = async (req, reply) => {
+  try {
+    const storeHash = req.storeHash;
+    const storeUrl = req.currentUser?.storeUrl || null;
+    const accessToken = req.accessToken || req.currentUser?.access_token;
+
+    if (!accessToken || !String(accessToken).trim()) {
+      return reply.status(401).send({
+        success: false,
+        message: "BigCommerce access token is missing for this store",
+      });
+    }
+
+    if (!storeUrl) {
+      return reply.status(400).send({
+        success: false,
+        message: "storeUrl is missing. Reinstall app to save store URL.",
+      });
+    }
+
+    const { error: settingError, settings } =
+      await fetchStoreOptimizationSettings(storeHash);
+    if (settingError) {
+      return reply.status(500).send({ success: false, message: settingError });
+    }
+
+    if (!hasAnyOptimizationFeatureEnabled(settings)) {
+      return reply.status(400).send({
+        success: false,
+        message: "No image optimization features are enabled in store settings",
+        data: { settings },
+      });
+    }
+
+    const { error: catalogError, items, meta } =
+      await fetchAllCatalogImagesInChunks({
+        storeHash,
+        accessToken,
+        storeUrl,
+      });
+
+    if (catalogError) {
+      const bcError = buildBigCommerceError(new Error(catalogError));
+      return reply.status(bcError.status).send(bcError.body);
+    }
+
+    req.catalogFetchMeta = meta;
+    return queueBulkImageJobs(req, reply, "bulk", items);
+  } catch (error) {
+    console.error("[bulkImageOptimization] Error:", error);
+    const bcError = buildBigCommerceError(error);
+    return reply.status(bcError.status).send(bcError.body);
+  }
+};
+
+exports.getOptimizationJob = async (req, reply) => {
+  try {
+    const jobUuid = req.params.job_uuid;
+    if (!jobUuid) {
+      return reply.status(400).send({
+        success: false,
+        message: "job_uuid is required",
+      });
+    }
+
+    const { error: statusError, job, logs, items } = await getOptimizationJobStatus(
+      jobUuid,
+      req.storeHash
+    );
+
+    if (statusError) {
+      return reply.status(500).send({
+        success: false,
+        message: statusError,
+      });
+    }
+
+    if (!job) {
+      return reply.status(404).send({
+        success: false,
+        message: "Optimization job not found",
+      });
+    }
+
+    return reply.status(200).send({
+      success: true,
+      data: { job, logs, items },
+    });
+  } catch (error) {
+    console.error("[getOptimizationJob] Error:", error);
+    return reply.status(500).send({
+      success: false,
+      message: error.message || "Failed to fetch optimization job",
+    });
+  }
+};
+
+// --- Image restore (single → multiple → bulk) ---
+exports.restoreImage = async (req, reply) => {
+  try {
+    const storeHash = req.storeHash;
+    const storeUrl = req.currentUser?.storeUrl || null;
+    const accessToken = req.accessToken || req.currentUser?.access_token || null;
+    const imageId = Number(req.params.image_id);
+    const productId = Number(req.body.product_id);
+
+    if (!Number.isFinite(imageId)) {
+      return reply.status(400).send({
+        success: false,
+        message: "image_id must be a valid number",
+      });
+    }
+
+    if (!Number.isFinite(productId)) {
+      return reply.status(400).send({
+        success: false,
+        message: "product_id is required and must be a valid number",
+      });
+    }
+
+    if (!accessToken || !String(accessToken).trim()) {
+      return reply.status(401).send({
+        success: false,
+        message: "BigCommerce access token is missing for this store",
+      });
+    }
+
+    if (!storeUrl) {
+      return reply.status(400).send({
+        success: false,
+        message: "storeUrl is missing. Reinstall app to save store URL.",
+      });
+    }
+
+    const placement = resolveImagePlacementFields(req.body || {});
+    const overrides = {
+      altText: req.body.altText ?? req.body.alt_text,
+      imageName: req.body.imageName ?? req.body.image_name,
+      placement,
+    };
+
+    const { queue, reason } = await validateRestoreItemForQueue(
+      storeHash,
+      productId,
+      imageId
+    );
+
+    if (!queue) {
+      return reply.status(400).send({
+        success: false,
+        message: reason,
+      });
+    }
+
+    const result = await restoreSingleImage({
+      storeHash,
+      storeUrl,
+      accessToken,
+      productId,
+      imageId,
+      overrides,
+    });
+
+    if (!result.success) {
+      return reply.status(result.statusCode || 400).send({
+        success: false,
+        message: result.error,
+        data: result.data || null,
+      });
+    }
+
+    return reply.status(200).send({
+      success: true,
+      message: "Image restored to original and optimization records removed",
+      data: result.data,
+    });
+  } catch (error) {
+    console.error("[restoreImage] Error:", error);
+    const bcError = buildBigCommerceError(error);
+    return reply.status(bcError.status).send(bcError.body);
+  }
+};
+
+/** Checkbox-selected images → job_type `restore_checkbox` */
+
+exports.bulkRestoreCheckbox = (req, reply) =>
+  queueBulkRestoreJobs(req, reply, "restore_checkbox");
+
+/** Full-store restore: all eligible optimized images */
+
+exports.bulkRestoreAll = async (req, reply) => {
+  try {
+    const storeHash = req.storeHash;
+    const accessToken = req.accessToken || req.currentUser?.access_token;
+
+    if (!accessToken || !String(accessToken).trim()) {
+      return reply.status(401).send({
+        success: false,
+        message: "BigCommerce access token is missing for this store",
+      });
+    }
+
+    const items = await fetchRestorableImagesForStore(storeHash);
+
+    req.restoreFetchMeta = {
+      restorable_images: items.length,
+    };
+
+    return queueBulkRestoreJobs(req, reply, "restore_bulk", items);
+  } catch (error) {
+    console.error("[bulkRestoreAll] Error:", error);
+    return reply.status(500).send({
+      success: false,
+      message: error.message || "Failed to queue bulk restore for store",
+    });
+  }
+};
+
+exports.getRestoreJob = async (req, reply) => {
+  try {
+    const jobUuid = req.params.job_uuid;
+    if (!jobUuid) {
+      return reply.status(400).send({
+        success: false,
+        message: "job_uuid is required",
+      });
+    }
+
+    const { error: statusError, job, logs, items } = await getRestoreJobStatus(
+      jobUuid,
+      req.storeHash
+    );
+
+    if (statusError) {
+      return reply.status(500).send({
+        success: false,
+        message: statusError,
+      });
+    }
+
+    if (!job) {
+      return reply.status(404).send({
+        success: false,
+        message: "Restore job not found",
+      });
+    }
+
+    return reply.status(200).send({
+      success: true,
+      data: { job, logs, items },
+    });
+  } catch (error) {
+    console.error("[getRestoreJob] Error:", error);
+    return reply.status(500).send({
+      success: false,
+      message: error.message || "Failed to fetch restore job",
+    });
+  }
+};
+
+// --- Other ---
+exports.updateAltText = async (req, reply) => {
+  try {
+    const storeHash = req.storeHash;
+    const accessToken =
+      req.currentUser?.access_token || req.accessToken || null;
+    const imageId = req.params.image_id;
+    const productId = req.body.product_id;
+    const altText = req.body.alt_text;
+    const placement = resolveImagePlacementFields(req.body || {});
+
+    if (!accessToken || !String(accessToken).trim()) {
+      return reply.status(401).send({
+        success: false,
+        message: "BigCommerce access token is missing for this store",
+      });
+    }
+
+    const result = await updateBigCommerceProductImageMetadata({
+      storeHash,
+      productId,
+      imageId,
+      accessToken,
+      description: altText,
+      ...placement,
+    });
+
+    if (result?.error) {
+      return reply.status(400).send({
+        success: false,
+        message: result.error,
+      });
+    }
+
+    if (result == null) {
+      return reply.status(400).send({
+        success: false,
+        message:
+          "At least one of alt_text, sort_order, or is_thumbnail is required",
+      });
+    }
+
+    await ImageOldData.updateOne(
+      {
+        store_hash: storeHash,
+        product_id: Number(productId),
+        image_id: Number(imageId),
+      },
+      {
+        $set: {
+          altText,
+          newAltText: altText,
+        },
+        $setOnInsert: {
+          store_hash: storeHash,
+          product_id: Number(productId),
+          image_id: Number(imageId),
+        },
+      },
+      { upsert: true }
+    ).catch(() => { });
+
+    return reply.status(200).send({
+      success: true,
+      message: "Alt text updated",
+      data: {
+        image_id: Number(imageId),
+        product_id: Number(productId),
+        alt_text: altText,
+        bigcommerce: result,
+      },
+    });
+  } catch (error) {
+    const bcError = buildBigCommerceError(error);
+
+    return reply.status(bcError.status).send(bcError.body);
+  }
+};
+
 //=======================================================
-// Bulk Image Optimization (BullMQ)
+// Helpers
 //=======================================================
 
 async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
@@ -867,6 +1210,7 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
             image_url: imageUrlRaw ? String(imageUrlRaw).trim() : null,
             status: "skipped",
             skip_reason: reason,
+            ...placementFieldsForJobItem(item),
           });
         }
       };
@@ -921,6 +1265,7 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
         image_id: Number(imageId),
         image_url: imageUrl,
         status: "queued",
+        ...placementFieldsForJobItem(item),
       });
 
       toQueue.push({
@@ -930,6 +1275,7 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
         imageUrl,
         optimization_status:
           item.optimization_status || item.status || null,
+        placementSource: item,
       });
     }
 
@@ -966,10 +1312,20 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
           settings,
           storeOptions: storeTemplateOptions,
           productContextCache,
+          placementOverrides: entry.placementSource || {},
         });
         return { ...entry, imageMeta };
       })
     );
+
+    const { error: placementSyncError } = await syncQueuedJobItemPlacements(
+      jobUuid,
+      toQueueWithMeta
+    );
+
+    if (placementSyncError) {
+      console.error("[queueBulkImageJobs] placement sync:", placementSyncError);
+    }
 
     const queueResults = await Promise.all(
       toQueueWithMeta.map((entry) =>
@@ -1075,108 +1431,6 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
   }
 }
 
-/** Full-store: fetch all BC product images (chunked) → queue job_type `bulk` */
-exports.bulkImageOptimization = async (req, reply) => {
-  try {
-    const storeHash = req.storeHash;
-    const storeUrl = req.currentUser?.storeUrl || null;
-    const accessToken = req.accessToken || req.currentUser?.access_token;
-
-    if (!accessToken || !String(accessToken).trim()) {
-      return reply.status(401).send({
-        success: false,
-        message: "BigCommerce access token is missing for this store",
-      });
-    }
-
-    if (!storeUrl) {
-      return reply.status(400).send({
-        success: false,
-        message: "storeUrl is missing. Reinstall app to save store URL.",
-      });
-    }
-
-    const { error: settingError, settings } =
-      await fetchStoreOptimizationSettings(storeHash);
-    if (settingError) {
-      return reply.status(500).send({ success: false, message: settingError });
-    }
-
-    if (!hasAnyOptimizationFeatureEnabled(settings)) {
-      return reply.status(400).send({
-        success: false,
-        message: "No image optimization features are enabled in store settings",
-        data: { settings },
-      });
-    }
-
-    const { error: catalogError, items, meta } =
-      await fetchAllCatalogImagesInChunks({
-        storeHash,
-        accessToken,
-        storeUrl,
-      });
-
-    if (catalogError) {
-      const bcError = buildBigCommerceError(new Error(catalogError));
-      return reply.status(bcError.status).send(bcError.body);
-    }
-
-    req.catalogFetchMeta = meta;
-    return queueBulkImageJobs(req, reply, "bulk", items);
-  } catch (error) {
-    console.error("[bulkImageOptimization] Error:", error);
-    const bcError = buildBigCommerceError(error);
-    return reply.status(bcError.status).send(bcError.body);
-  }
-};
-
-/** Checkbox-selected images → job_type `checkBox` */
-exports.bulkImageOptimizationCheckbox = (req, reply) =>
-  queueBulkImageJobs(req, reply, "checkBox");
-
-exports.getOptimizationJob = async (req, reply) => {
-  try {
-    const jobUuid = req.params.job_uuid;
-    if (!jobUuid) {
-      return reply.status(400).send({
-        success: false,
-        message: "job_uuid is required",
-      });
-    }
-
-    const { error: statusError, job, logs, items } = await getOptimizationJobStatus(
-      jobUuid,
-      req.storeHash
-    );
-
-    if (statusError) {
-      return reply.status(500).send({
-        success: false,
-        message: statusError,
-      });
-    }
-
-    if (!job) {
-      return reply.status(404).send({
-        success: false,
-        message: "Optimization job not found",
-      });
-    }
-
-    return reply.status(200).send({
-      success: true,
-      data: { job, logs, items },
-    });
-  } catch (error) {
-    console.error("[getOptimizationJob] Error:", error);
-    return reply.status(500).send({
-      success: false,
-      message: error.message || "Failed to fetch optimization job",
-    });
-  }
-};
-
 async function queueBulkRestoreJobs(req, reply, jobType, itemsOverride = null) {
   try {
     const items =
@@ -1220,6 +1474,11 @@ async function queueBulkRestoreJobs(req, reply, jobType, itemsOverride = null) {
       const shop = item.shop != null ? String(item.shop).trim() : "";
       const productId = item.product_id;
       const imageId = item.image_id;
+      const imageUrlRaw = item.image_url;
+      const imageUrlForJob =
+        imageUrlRaw != null && String(imageUrlRaw).trim()
+          ? String(imageUrlRaw).trim()
+          : null;
 
       const pushSkipped = (reason, extra = {}) => {
         skipped.push({
@@ -1236,7 +1495,7 @@ async function queueBulkRestoreJobs(req, reply, jobType, itemsOverride = null) {
             job_type: jobType,
             product_id: Number(productId),
             image_id: Number(imageId),
-            image_url: null,
+            image_url: imageUrlForJob,
             status: "skipped",
             skip_reason: reason,
           });
@@ -1275,7 +1534,7 @@ async function queueBulkRestoreJobs(req, reply, jobType, itemsOverride = null) {
         job_type: jobType,
         product_id: Number(productId),
         image_id: Number(imageId),
-        image_url: null,
+        image_url: imageUrlForJob,
         status: "queued",
       });
 
@@ -1397,318 +1656,3 @@ async function queueBulkRestoreJobs(req, reply, jobType, itemsOverride = null) {
     });
   }
 }
-
-/** Single image restore (sync) with job tracking and logs. */
-exports.restoreImage = async (req, reply) => {
-  try {
-    const storeHash = req.storeHash;
-    const storeUrl = req.currentUser?.storeUrl || null;
-    const accessToken = req.accessToken || req.currentUser?.access_token || null;
-    const imageId = Number(req.params.image_id);
-    const productId = Number(req.body.product_id);
-
-    if (!Number.isFinite(imageId)) {
-      return reply.status(400).send({
-        success: false,
-        message: "image_id must be a valid number",
-      });
-    }
-
-    if (!Number.isFinite(productId)) {
-      return reply.status(400).send({
-        success: false,
-        message: "product_id is required and must be a valid number",
-      });
-    }
-
-    if (!accessToken || !String(accessToken).trim()) {
-      return reply.status(401).send({
-        success: false,
-        message: "BigCommerce access token is missing for this store",
-      });
-    }
-
-    if (!storeUrl) {
-      return reply.status(400).send({
-        success: false,
-        message: "storeUrl is missing. Reinstall app to save store URL.",
-      });
-    }
-
-    const jobUuid = crypto.randomUUID();
-    const jobType = "restore_single";
-    const placement = resolveImagePlacementFields(req.body || {});
-    const overrides = {
-      altText: req.body.altText ?? req.body.alt_text,
-      imageName: req.body.imageName ?? req.body.image_name,
-      ...placement,
-    };
-
-    const { queue, reason } = await validateRestoreItemForQueue(
-      storeHash,
-      productId,
-      imageId
-    );
-
-    const jobItems = [
-      {
-        job_uuid: jobUuid,
-        store_hash: storeHash,
-        job_type: jobType,
-        product_id: productId,
-        image_id: imageId,
-        status: queue ? "queued" : "skipped",
-        skip_reason: queue ? null : reason,
-      },
-    ];
-
-    const { error: createJobError } = await createRestoreJob({
-      jobUuid,
-      storeHash,
-      jobType,
-      totalImages: 1,
-      queuedImages: queue ? 1 : 0,
-      skippedImages: queue ? 0 : 1,
-      jobItems,
-    });
-
-    if (createJobError) {
-      return reply.status(500).send({
-        success: false,
-        message: createJobError,
-      });
-    }
-
-    if (!queue) {
-      await writeRestoreLogs([
-        {
-          job_uuid: jobUuid,
-          store_hash: storeHash,
-          job_type: jobType,
-          image_id: imageId,
-          product_id: productId,
-          log_type: "warning",
-          step: "skip",
-          message: reason,
-        },
-      ]);
-
-      return reply.status(400).send({
-        success: false,
-        message: reason,
-      });
-    }
-
-    await setRestoreJobItemStatus({
-      jobUuid,
-      productId,
-      imageId,
-      status: "restoring",
-    });
-
-    const result = await restoreSingleImage({
-      storeHash,
-      storeUrl,
-      accessToken,
-      productId,
-      imageId,
-      overrides: { ...overrides, placement },
-      logContext: {
-        jobUuid,
-        storeHash,
-        jobType,
-        productId,
-        imageId,
-      },
-    });
-
-    await recordRestoreJobImageResult({
-      jobUuid,
-      storeHash,
-      success: result.success,
-      imageId,
-      productId,
-      errorMessage: result.error,
-      jobType,
-      meta: result.data || {},
-    });
-
-    if (!result.success) {
-      const status = result.statusCode || 400;
-      return reply.status(status).send({
-        success: false,
-        message: result.error,
-        data: { job_uuid: jobUuid, ...(result.data || {}) },
-      });
-    }
-
-    const { job: jobRecord } = await getRestoreJobStatus(jobUuid, storeHash);
-
-    return reply.status(200).send({
-      success: true,
-      message: "Image restored to original and optimization records removed",
-      data: {
-        job_uuid: jobUuid,
-        job: jobRecord,
-        ...result.data,
-      },
-    });
-  } catch (error) {
-    console.error("[restoreImage] Error:", error);
-    const bcError = buildBigCommerceError(error);
-    return reply.status(bcError.status).send(bcError.body);
-  }
-};
-
-/** Checkbox-selected images → job_type `restore_checkbox` */
-exports.bulkRestoreCheckbox = (req, reply) =>
-  queueBulkRestoreJobs(req, reply, "restore_checkbox");
-
-/** Full-store restore: all eligible optimized images */
-exports.bulkRestoreAll = async (req, reply) => {
-  try {
-    const storeHash = req.storeHash;
-    const accessToken = req.accessToken || req.currentUser?.access_token;
-
-    if (!accessToken || !String(accessToken).trim()) {
-      return reply.status(401).send({
-        success: false,
-        message: "BigCommerce access token is missing for this store",
-      });
-    }
-
-    const items = await fetchRestorableImagesForStore(storeHash);
-
-    req.restoreFetchMeta = {
-      restorable_images: items.length,
-    };
-
-    return queueBulkRestoreJobs(req, reply, "restore_bulk", items);
-  } catch (error) {
-    console.error("[bulkRestoreAll] Error:", error);
-    return reply.status(500).send({
-      success: false,
-      message: error.message || "Failed to queue bulk restore for store",
-    });
-  }
-};
-
-exports.getRestoreJob = async (req, reply) => {
-  try {
-    const jobUuid = req.params.job_uuid;
-    if (!jobUuid) {
-      return reply.status(400).send({
-        success: false,
-        message: "job_uuid is required",
-      });
-    }
-
-    const { error: statusError, job, logs, items } = await getRestoreJobStatus(
-      jobUuid,
-      req.storeHash
-    );
-
-    if (statusError) {
-      return reply.status(500).send({
-        success: false,
-        message: statusError,
-      });
-    }
-
-    if (!job) {
-      return reply.status(404).send({
-        success: false,
-        message: "Restore job not found",
-      });
-    }
-
-    return reply.status(200).send({
-      success: true,
-      data: { job, logs, items },
-    });
-  } catch (error) {
-    console.error("[getRestoreJob] Error:", error);
-    return reply.status(500).send({
-      success: false,
-      message: error.message || "Failed to fetch restore job",
-    });
-  }
-};
-
-exports.updateAltText = async (req, reply) => {
-  try {
-    const storeHash = req.storeHash;
-    const accessToken =
-      req.currentUser?.access_token || req.accessToken || null;
-    const imageId = req.params.image_id;
-    const productId = req.body.product_id;
-    const altText = req.body.alt_text;
-    const placement = resolveImagePlacementFields(req.body || {});
-
-    if (!accessToken || !String(accessToken).trim()) {
-      return reply.status(401).send({
-        success: false,
-        message: "BigCommerce access token is missing for this store",
-      });
-    }
-
-    const result = await updateBigCommerceProductImageMetadata({
-      storeHash,
-      productId,
-      imageId,
-      accessToken,
-      description: altText,
-      ...placement,
-    });
-
-    if (result?.error) {
-      return reply.status(400).send({
-        success: false,
-        message: result.error,
-      });
-    }
-
-    if (result == null) {
-      return reply.status(400).send({
-        success: false,
-        message:
-          "At least one of alt_text, sort_order, or is_thumbnail is required",
-      });
-    }
-
-    await ImageOldData.updateOne(
-      {
-        store_hash: storeHash,
-        product_id: Number(productId),
-        image_id: Number(imageId),
-      },
-      {
-        $set: {
-          altText,
-          newAltText: altText,
-        },
-        $setOnInsert: {
-          store_hash: storeHash,
-          product_id: Number(productId),
-          image_id: Number(imageId),
-        },
-      },
-      { upsert: true }
-    ).catch(() => {});
-
-    return reply.status(200).send({
-      success: true,
-      message: "Alt text updated",
-      data: {
-        image_id: Number(imageId),
-        product_id: Number(productId),
-        alt_text: altText,
-        bigcommerce: result,
-      },
-    });
-  } catch (error) {
-    const bcError = buildBigCommerceError(error);
-
-    return reply.status(bcError.status).send(bcError.body);
-  }
-};

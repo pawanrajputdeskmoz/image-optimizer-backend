@@ -276,6 +276,62 @@ exports.resolveGeneratedImageMeta = ({
 /**
  * Build worker imageMeta from store templates + BC image + DB (bulk/checkbox jobs).
  */
+exports.placementFieldsForJobItem = (source = {}) => {
+  const placement = exports.resolveImagePlacementFields(source);
+  const fields = {};
+
+  if (placement.sortOrder != null) {
+    fields.sort_order = placement.sortOrder;
+  }
+  if (placement.isThumbnail != null) {
+    fields.is_thumbnail = placement.isThumbnail;
+  }
+
+  return fields;
+};
+
+exports.syncQueuedJobItemPlacements = async (jobUuid, entries = []) => {
+  if (!jobUuid || !Array.isArray(entries) || entries.length === 0) {
+    return { error: null };
+  }
+
+  const ops = entries
+    .map((entry) => {
+      const { sortOrder, isThumbnail } = entry.imageMeta || {};
+      const $set = {};
+
+      if (sortOrder != null) {
+        $set.sort_order = sortOrder;
+      }
+      if (isThumbnail != null) {
+        $set.is_thumbnail = isThumbnail;
+      }
+
+      if (Object.keys($set).length === 0) {
+        return null;
+      }
+
+      return {
+        updateOne: {
+          filter: buildItemFilter(jobUuid, entry.productId, entry.imageId),
+          update: { $set },
+        },
+      };
+    })
+    .filter(Boolean);
+
+  if (ops.length === 0) {
+    return { error: null };
+  }
+
+  try {
+    await ImageJobItem.bulkWrite(ops, { ordered: false });
+    return { error: null };
+  } catch (err) {
+    return { error: err.message };
+  }
+};
+
 exports.buildJobImageMeta = async ({
   storeHash,
   productId,
@@ -284,6 +340,7 @@ exports.buildJobImageMeta = async ({
   settings,
   storeOptions = {},
   productContextCache = null,
+  placementOverrides = {},
 }) => {
   const runFilename = Boolean(settings?.is_filename_template_enabled);
   const runAltText = Boolean(settings?.is_alt_text_template_enabled);
@@ -291,8 +348,14 @@ exports.buildJobImageMeta = async ({
   const cache =
     productContextCache instanceof Map ? productContextCache : new Map();
 
+  const placementFromOverrides =
+    exports.resolveImagePlacementFields(placementOverrides);
+  const needsBcPlacement =
+    placementFromOverrides.sortOrder == null ||
+    placementFromOverrides.isThumbnail == null;
+
   let bcImage = null;
-  if (runFilename || runAltText || runOptimize) {
+  if (runFilename || runAltText || runOptimize || needsBcPlacement) {
     try {
       const res = await get(
         `https://api.bigcommerce.com/stores/${storeHash}/v3/catalog/products/${productId}/images/${imageId}`,
@@ -342,7 +405,10 @@ exports.buildJobImageMeta = async ({
       savedFromDb,
     });
 
-  const placement = exports.resolveImagePlacementFields(bcImage || {});
+  const placement = exports.resolveImagePlacementFields({
+    ...(bcImage || {}),
+    ...placementOverrides,
+  });
 
   return {
     oldImageName,
@@ -588,6 +654,8 @@ exports.fetchAllCatalogImagesInChunks = async ({
             image_id: imageId,
             image_url: imageUrl,
             shop: storeHash,
+            sort_order: image.sort_order ?? null,
+            is_thumbnail: image.is_thumbnail ?? null,
           });
         }
       }

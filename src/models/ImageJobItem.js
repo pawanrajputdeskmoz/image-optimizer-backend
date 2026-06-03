@@ -36,6 +36,16 @@ const ImageJobItemSchema = new mongoose.Schema(
       default: null,
     },
 
+    sort_order: {
+      type: Number,
+      default: null,
+    },
+
+    is_thumbnail: {
+      type: Boolean,
+      default: null,
+    },
+
     status: {
       type: String,
       enum: IMAGE_JOB_ITEM_STATUSES,
