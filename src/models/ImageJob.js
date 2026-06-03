@@ -1,6 +1,5 @@
-// models/ImageOptimizationJob.js
-
 const mongoose = require("mongoose");
+const { JOB_TYPES, IMAGE_JOB_STATUSES } = require("./constants");
 
 const ImageOptimizationJobSchema = new mongoose.Schema(
   {
@@ -19,18 +18,12 @@ const ImageOptimizationJobSchema = new mongoose.Schema(
 
     job_type: {
       type: String,
-      enum: [
-        "single",
-        "bulk",
-        "webhook",
-        "reoptimize",
-        "checkBox",
-      ],
+      enum: JOB_TYPES,
       default: "single",
       index: true,
     },
 
-    /** Total images in the bulk request (queued + skipped). */
+    /** Total images in the request (valid + skipped). */
     total_images: {
       type: Number,
       default: 0,
@@ -64,13 +57,7 @@ const ImageOptimizationJobSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: [
-        "pending",
-        "processing",
-        "completed",
-        "failed",
-        "cancelled",
-      ],
+      enum: IMAGE_JOB_STATUSES,
       default: "pending",
       index: true,
     },

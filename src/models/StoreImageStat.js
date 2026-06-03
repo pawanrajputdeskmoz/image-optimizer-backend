@@ -1,5 +1,3 @@
-// models/StoreImageStat.js
-
 const mongoose = require("mongoose");
 
 const StoreImageStatSchema = new mongoose.Schema(
@@ -11,22 +9,12 @@ const StoreImageStatSchema = new mongoose.Schema(
       index: true,
     },
 
-    total_images: {
-      type: Number,
-      default: 0,
-    },
-
-    optimized_images: { 
+    optimized_images: {
       type: Number,
       default: 0,
     },
 
     failed_images: {
-      type: Number,
-      default: 0,
-    },
-
-    pending_images: {
       type: Number,
       default: 0,
     },
@@ -64,7 +52,4 @@ const StoreImageStatSchema = new mongoose.Schema(
   }
 );
 
-module.exports = mongoose.model(
-  "StoreImageStat",
-  StoreImageStatSchema
-);
+module.exports = mongoose.model("StoreImageStat", StoreImageStatSchema);

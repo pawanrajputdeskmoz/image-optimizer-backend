@@ -15,7 +15,6 @@ const StoreOptimizationSettingsSchema = new mongoose.Schema(
       type: String,
       required: true,
       unique: true,
-      index: true,
       trim: true,
     },
 
@@ -120,7 +119,10 @@ const StoreOptimizationSettingsSchema = new mongoose.Schema(
 
   },
   {
-    timestamps: true,
+    timestamps: {
+      createdAt: "created_at",
+      updatedAt: "updated_at",
+    },
   }
 );
 

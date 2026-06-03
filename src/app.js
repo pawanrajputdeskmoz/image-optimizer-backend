@@ -17,7 +17,6 @@ if (envPath) {
 const {
   imageOptimizationRoutes,
   installationRoutes,
-  queueRoutes,
   settingRoutes,
 } = require("./modules");
 const { connectMongo } = require("./db/mongo");
@@ -39,9 +38,6 @@ async function buildApp() {
   await app.register(settingRoutes, { prefix: "/api/settings" });
   await app.register(installationRoutes, { prefix: "/store" });
 
-  // Enqueue jobs without a prefix (exact route: POST /add-job)
-  await app.register(queueRoutes);
-
   return app;
 }
 
@@ -54,6 +50,7 @@ function createFastifyInstance() {
         coerceTypes: true,
         allErrors: true,
         removeAdditional: "all",
+        allowUnionTypes: true,
       },
     },
   });

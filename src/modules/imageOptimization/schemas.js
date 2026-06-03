@@ -105,6 +105,37 @@ const bulkImageOptimizationAllSchema = {
   },
 };
 
+const bulkRestoreSchema = {
+  body: {
+    type: "array",
+    minItems: 1,
+    items: {
+      type: "object",
+      required: ["product_id", "image_id"],
+      properties: {
+        image_id: { type: ["integer", "string"] },
+        product_id: { type: ["integer", "string"] },
+        shop: { type: "string" },
+        imageName: { type: "string" },
+        image_name: { type: "string" },
+        altText: { type: "string" },
+        alt_text: { type: "string" },
+        sort_order: { type: ["integer", "string"] },
+        is_thumbnail: { type: ["boolean", "string"] },
+        is_thumnail: { type: ["boolean", "string"] },
+      },
+    },
+  },
+};
+
+const bulkRestoreAllSchema = {
+  body: {
+    type: "object",
+    additionalProperties: false,
+    properties: {},
+  },
+};
+
 const restoreImageSchema = {
   params: {
     type: "object",
@@ -145,4 +176,6 @@ module.exports = {
   getPreviewImgDataSchema,
   updateAltTextSchema,
   restoreImageSchema,
+  bulkRestoreSchema,
+  bulkRestoreAllSchema,
 };

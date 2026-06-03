@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { IMAGE_STATUS_VALUES, IMAGE_UPDATE_STATUS_VALUES } = require("./constants");
 
 const ImageStatusSchema = new mongoose.Schema(
   {
@@ -22,26 +23,16 @@ const ImageStatusSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: [
-        "pending",
-        "optimizing",
-        "optimized",
-        "restored",
-        "failed",
-        "skipped",
-      ],
+      enum: IMAGE_STATUS_VALUES,
       default: "pending",
       index: true,
     },
 
-    retry_count: {
-      type: Number,
-      default: 0,
-    },
-
-    processing_time_ms: {
-      type: Number,
-      default: 0,
+    image_update_status: {
+      type: String,
+      enum: IMAGE_UPDATE_STATUS_VALUES,
+      default: "pending",
+      index: true,
     },
 
     optimization_started_at: {

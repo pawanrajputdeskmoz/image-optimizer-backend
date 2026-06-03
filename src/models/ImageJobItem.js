@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { JOB_TYPES, IMAGE_JOB_ITEM_STATUSES } = require("./constants");
 
 const ImageJobItemSchema = new mongoose.Schema(
   {
@@ -16,7 +17,7 @@ const ImageJobItemSchema = new mongoose.Schema(
 
     job_type: {
       type: String,
-      enum: ["single", "bulk", "webhook", "reoptimize", "checkBox"],
+      enum: JOB_TYPES,
       required: true,
     },
 
@@ -37,7 +38,7 @@ const ImageJobItemSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["queued", "optimizing", "optimized", "failed", "skipped"],
+      enum: IMAGE_JOB_ITEM_STATUSES,
       default: "queued",
       index: true,
     },

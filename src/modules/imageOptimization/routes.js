@@ -7,6 +7,9 @@ const {
   getPreviewImgData,
   updateAltText,
   restoreImage,
+  bulkRestoreCheckbox,
+  bulkRestoreAll,
+  getRestoreJob,
 } = require("./controller");
 const {
   singleImageOptimizationSchema,
@@ -15,6 +18,8 @@ const {
   getPreviewImgDataSchema,
   updateAltTextSchema,
   restoreImageSchema,
+  bulkRestoreSchema,
+  bulkRestoreAllSchema,
 } = require("./schemas");
 const { authStore } = require("../../middlewares/auth");
 
@@ -81,6 +86,30 @@ async function imageOptimizationRoutes(app) {
       schema: restoreImageSchema,
     },
     restoreImage
+  );
+
+  app.post(
+    "/bulk-restore",
+    {
+      preHandler: authStore,
+      schema: bulkRestoreSchema,
+    },
+    bulkRestoreCheckbox
+  );
+
+  app.post(
+    "/bulk-restore-all",
+    {
+      preHandler: authStore,
+      schema: bulkRestoreAllSchema,
+    },
+    bulkRestoreAll
+  );
+
+  app.get(
+    "/restore-job/:job_uuid",
+    { preHandler: authStore },
+    getRestoreJob
   );
 }
 

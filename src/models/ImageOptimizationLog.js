@@ -1,6 +1,5 @@
-// models/ImageOptimizationLog.js
-
 const mongoose = require("mongoose");
+const { JOB_TYPES, LOG_TYPES, LOG_STEPS } = require("./constants");
 
 const ImageOptimizationLogSchema = new mongoose.Schema(
   {
@@ -18,7 +17,7 @@ const ImageOptimizationLogSchema = new mongoose.Schema(
 
     job_type: {
       type: String,
-      enum: ["checkBox", "bulk", "single", "webhook", "reoptimize"],
+      enum: JOB_TYPES,
       required: true,
       index: true,
     },
@@ -37,18 +36,21 @@ const ImageOptimizationLogSchema = new mongoose.Schema(
 
     log_type: {
       type: String,
-      enum: [
-        "info",
-        "warning",
-        "error",
-      ],
+      enum: LOG_TYPES,
       default: "info",
       index: true,
     },
 
+    /** One of LOG_STEPS in constants.js, or null when omitted. */
     step: {
       type: String,
       default: null,
+      validate: {
+        validator(value) {
+          return value == null || LOG_STEPS.includes(value);
+        },
+        message: "Invalid log step",
+      },
     },
 
     message: {
@@ -70,7 +72,11 @@ const ImageOptimizationLogSchema = new mongoose.Schema(
 );
 
 ImageOptimizationLogSchema.index({ job_uuid: 1, created_at: -1 });
-ImageOptimizationLogSchema.index({ store_hash: 1, job_type: 1, created_at: -1 });
+ImageOptimizationLogSchema.index({
+  store_hash: 1,
+  job_type: 1,
+  created_at: -1,
+});
 
 module.exports = mongoose.model(
   "ImageOptimizationLog",

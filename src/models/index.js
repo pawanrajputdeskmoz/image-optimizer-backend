@@ -7,8 +7,9 @@ const basename = path.basename(__filename);
 fs.readdirSync(__dirname)
   .filter((file) => {
     return (
-      file !== basename && // exclude index.js
-      file.endsWith(".js") // only JS files
+      file !== basename &&
+      file !== "constants.js" &&
+      file.endsWith(".js")
     );
   })
   .forEach((file) => {

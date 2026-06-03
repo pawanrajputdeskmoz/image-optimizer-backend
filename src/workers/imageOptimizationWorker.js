@@ -10,6 +10,8 @@ const { resolveProductImageUrl } = require("../utils/urls");
 const {
   setJobItemStatus,
   recordOptimizationJobImageResult,
+  appendImageLog,
+  shouldSkipImageOptimization,
 } = require("../modules/imageOptimization/services");
 
 const envPath = [path.join(process.cwd(), ".env"), path.join(__dirname, "../.env")].find(
@@ -44,6 +46,9 @@ async function startWorker() {
       const jobType = jobTypeFromData || legacyJobType || "bulk";
       const maxAttempts = job.opts.attempts || 1;
       const isLastAttempt = job.attemptsMade + 1 >= maxAttempts;
+      const logContext = jobUuid
+        ? { jobUuid, storeHash, jobType, productId, imageId }
+        : null;
 
       if (jobUuid) {
         const { error: statusError } = await setJobItemStatus({
@@ -55,6 +60,54 @@ async function startWorker() {
 
         if (statusError) {
           console.error("[image-optimization-worker] optimizing status:", statusError);
+          await appendImageLog({
+            jobUuid,
+            storeHash,
+            jobType,
+            imageId,
+            productId,
+            logType: "error",
+            step: "worker",
+            message: "Failed to set job item status to optimizing",
+            meta: { error: statusError },
+          });
+        }
+      }
+
+      const forceReoptimize = Boolean(job.data?.force || job.data?.force_reoptimize);
+      if (!forceReoptimize) {
+        const clientStatus = String(
+          job.data?.optimization_status || job.data?.status || ""
+        ).toLowerCase();
+        const alreadyOptimizedOnClient = ["optimized", "optimizing"].includes(
+          clientStatus
+        );
+        const { skip, reason } = await shouldSkipImageOptimization(
+          storeHash,
+          productId,
+          imageId
+        );
+
+        if (skip || alreadyOptimizedOnClient) {
+          const skipMessage =
+            reason || "Image is already optimized or currently optimizing";
+
+          if (jobUuid) {
+            await setJobItemStatus({
+              jobUuid,
+              productId,
+              imageId,
+              status: "skipped",
+              errorMessage: skipMessage,
+            });
+          }
+
+          return {
+            skipped: true,
+            reason: skipMessage,
+            image_id: imageId,
+            product_id: productId,
+          };
         }
       }
 
@@ -66,6 +119,7 @@ async function startWorker() {
         if (jobUuid && isLastAttempt) {
           const { error: recordError } = await recordOptimizationJobImageResult({
             jobUuid,
+            storeHash,
             success: false,
             imageId,
             productId,
@@ -95,6 +149,7 @@ async function startWorker() {
           imageUrl: resolvedUrl,
           settings,
           imageMeta,
+          logContext,
         });
 
         if (!result.success) {
@@ -120,6 +175,7 @@ async function startWorker() {
         const compression = resultData?.optimizedImage?.compression;
         const { error: recordError } = await recordOptimizationJobImageResult({
           jobUuid,
+          storeHash,
           success,
           imageId,
           productId,
@@ -156,7 +212,7 @@ async function startWorker() {
     });
   });
 
-  worker.on("failed", (job, err) => {
+  worker.on("failed", async (job, err) => {
     console.error("[image-optimization-worker] failed", {
       jobId: job?.id,
       jobUuid: job?.data?.jobUuid,
@@ -164,6 +220,24 @@ async function startWorker() {
       productId: job?.data?.productId,
       error: err?.message,
     });
+
+    const data = job?.data;
+    if (data?.storeHash) {
+      await appendImageLog({
+        jobUuid: data.jobUuid,
+        storeHash: data.storeHash,
+        jobType: data.job_type || data.type || "bulk",
+        imageId: data.imageId,
+        productId: data.productId,
+        logType: "error",
+        step: "worker",
+        message: err?.message || "Image optimization worker job failed",
+        meta: {
+          bull_job_id: job?.id,
+          attempts_made: job?.attemptsMade,
+        },
+      });
+    }
   });
 
   console.log("[image-optimization-worker] started", { queue: QUEUE_NAME });
