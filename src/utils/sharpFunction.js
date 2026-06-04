@@ -2,22 +2,18 @@ const sharp = require("sharp");
 const axios = require("axios");
 const fs = require("fs/promises");
 const path = require("path");
-
-const DEFAULT_IMAGE_FETCH_TIMEOUT_MS = 12_000;
-const DEFAULT_MAX_IMAGE_BYTES = 25 * 1024 * 1024;
-const DEFAULT_SIZE_FETCH_CONCURRENCY = 8;
-const DEFAULT_OUTPUT_FORMAT = "jpeg";
+const config = require("../config");
 
 /** Pass through to sharp; "original" skips cross-format conversion. */
 exports.resolveOptimizeFormat = (outputFormat) => {
-  const value = String(outputFormat ?? DEFAULT_OUTPUT_FORMAT)
+  const value = String(outputFormat ?? config.image.outputFormat)
     .trim()
     .toLowerCase();
 
   if (value === "original") return "original";
   if (value === "jpg") return "jpeg";
   if (["jpeg", "png", "webp", "avif"].includes(value)) return value;
-  return DEFAULT_OUTPUT_FORMAT;
+  return config.image.outputFormat;
 };
 
 
@@ -28,8 +24,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * Same as getImageSizeFromUrl but retries (BC CDN can lag right after upload).
  */
 exports.getImageSizeFromUrlWithRetry = async (imageUrl, options = {}) => {
-  const retries = options.retries ?? 4;
-  const retryDelayMs = options.retryDelayMs ?? 750;
+  const retries = options.retries ?? config.image.sizeFetchRetries;
+  const retryDelayMs =
+    options.retryDelayMs ?? config.image.sizeFetchRetryDelayMs;
   let lastResult = null;
 
   for (let attempt = 0; attempt < retries; attempt += 1) {
@@ -48,7 +45,7 @@ exports.getImageSizeFromUrlWithRetry = async (imageUrl, options = {}) => {
 
 exports.getImageSizesFromUrls = async (items, options = {}) => {
   const concurrency =
-    options.concurrency ?? DEFAULT_SIZE_FETCH_CONCURRENCY;
+    options.concurrency ?? config.image.sizeFetchConcurrency;
   const sizeByImageId = Object.create(null);
 
   if (!Array.isArray(items) || items.length === 0) {
@@ -93,8 +90,8 @@ exports.getImageSizesFromUrls = async (items, options = {}) => {
 
 
 exports.getImageSizeFromUrl = async (imageUrl, options = {}) => {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_IMAGE_FETCH_TIMEOUT_MS;
-  const maxBytes = options.maxBytes ?? DEFAULT_MAX_IMAGE_BYTES;
+  const timeoutMs = options.timeoutMs ?? config.image.fetchTimeoutMs;
+  const maxBytes = options.maxBytes ?? config.image.maxBytes;
 
   if (!imageUrl || typeof imageUrl !== "string") {
     return {
@@ -194,13 +191,7 @@ exports.buildOptimizationMetadataFromUrls = async (
 
 const ENCODE_FORMATS = new Set(["jpeg", "png", "webp", "gif", "avif"]);
 
-/** Default Sharp encode quality (~1% visible loss vs max). */
-const DEFAULT_ENCODE_QUALITY = 88;
-
-const MAX_PRODUCT_DIMENSION =
-  Number(process.env.OPTIMIZE_MAX_DIMENSION) || 2560;
-
-function clampQuality(quality, fallback = DEFAULT_ENCODE_QUALITY) {
+function clampQuality(quality, fallback = config.image.encodeQuality) {
   const q = Number(quality);
   if (!Number.isFinite(q)) return fallback;
   return Math.min(100, Math.max(1, Math.round(q)));
@@ -224,7 +215,7 @@ function mapFrontendQualityToSharpQuality(imageQuality) {
 
 function resolveEncodeQuality(qualityOption) {
   return mapFrontendQualityToSharpQuality(
-    clampQuality(qualityOption, DEFAULT_ENCODE_QUALITY)
+    clampQuality(qualityOption, config.image.encodeQuality)
   );
 }
 
@@ -239,7 +230,10 @@ function normalizeInputFormat(format) {
 function needsResize(meta) {
   const w = Number(meta.width) || 0;
   const h = Number(meta.height) || 0;
-  return w > MAX_PRODUCT_DIMENSION || h > MAX_PRODUCT_DIMENSION;
+  return (
+    w > config.image.optimizeMaxDimension ||
+    h > config.image.optimizeMaxDimension
+  );
 }
 
 function normalizeFormat(format) {
@@ -254,7 +248,9 @@ function normalizeFormat(format) {
  * Transparent sources stay PNG/WebP/AVIF unless merchant explicitly chose JPEG.
  */
 function resolveOutputFormat(formatOption, inputFormat, hasAlpha = false) {
-  const requested = String(formatOption || DEFAULT_OUTPUT_FORMAT).toLowerCase();
+  const requested = String(
+    formatOption || config.image.outputFormat
+  ).toLowerCase();
 
   if (requested === "original" || requested === "null") {
     const normalized = normalizeFormat(inputFormat);
@@ -279,7 +275,7 @@ function resolveOutputFormat(formatOption, inputFormat, hasAlpha = false) {
     return "jpeg";
   }
 
-  return normalizeFormat(requested) || DEFAULT_OUTPUT_FORMAT;
+  return normalizeFormat(requested) || config.image.outputFormat;
 }
 
 /** Encode presets: strip bloat, no mozjpeg/sharpen, ~1% loss at store quality. */
@@ -385,8 +381,8 @@ async function encodeWithSharp(originalSRC, { format, quality, meta: metaIn }) {
    // Resize (VERY IMPORTANT)
    if (!isGif) {
     pipeline = pipeline.resize({
-      width: MAX_PRODUCT_DIMENSION,
-      height: MAX_PRODUCT_DIMENSION,
+      width: config.image.optimizeMaxDimension,
+      height: config.image.optimizeMaxDimension,
       fit: "inside",
       withoutEnlargement: true,
       kernel: sharp.kernel.lanczos3,
@@ -396,8 +392,8 @@ async function encodeWithSharp(originalSRC, { format, quality, meta: metaIn }) {
 
   if (!isGif && needsResize(meta)) {
     pipeline = pipeline.resize({
-      width: MAX_PRODUCT_DIMENSION,
-      height: MAX_PRODUCT_DIMENSION,
+      width: config.image.optimizeMaxDimension,
+      height: config.image.optimizeMaxDimension,
       fit: "inside",
       withoutEnlargement: true,
     });

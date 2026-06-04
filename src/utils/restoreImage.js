@@ -12,9 +12,11 @@ const { resolveProductImageUrl } = require("./urls");
 const {
   uploadProductImage,
   deleteProductImage,
+  updateProductImageMetadata,
 } = require("./bigCommerceProductImage");
 const { get } = require("./axiosUtils");
 const { appendImageLog, resolveJobUuid } = require("./imageActivityLog");
+const config = require("../config");
 
 async function logRestoreActivity(
   logContext,
@@ -42,7 +44,7 @@ async function logRestoreActivity(
   });
 }
 
-const RESTORE_BACKUP_DAYS = Number(process.env.RESTORE_BACKUP_DAYS) || 30;
+const RESTORE_BACKUP_DAYS = config.restore.backupDays;
 const RESTORE_BACKUP_MS = RESTORE_BACKUP_DAYS * 24 * 60 * 60 * 1000;
 
 function buildLookup(storeHash, productId, imageId) {
@@ -169,17 +171,19 @@ async function validateRestoreEligibility({
 }
 
 function resolveRestoreUploadMeta({ overrides = {}, imageOldData, originalPath }) {
+  // Prefer backup metadata saved at optimization time. Bulk/checkbox payloads often
+  // include the current (post-optimize) alt text from the catalog UI, which must not
+  // override the original.
   const description =
+    (imageOldData?.altText && String(imageOldData.altText).trim()) ||
     (overrides.altText && String(overrides.altText).trim()) ||
     (overrides.alt_text && String(overrides.alt_text).trim()) ||
-    imageOldData?.altText ||
-    imageOldData?.newAltText ||
     "Restored original image";
 
   const uploadFileName =
+    (imageOldData?.imageName && String(imageOldData.imageName).trim()) ||
     (overrides.imageName && String(overrides.imageName).trim()) ||
     (overrides.image_name && String(overrides.image_name).trim()) ||
-    imageOldData?.imageName ||
     path.basename(originalPath);
 
   return { description, uploadFileName };
@@ -345,6 +349,36 @@ async function restoreSingleImage({
     };
   }
 
+  const restoredImageId = restoredImage.id;
+  if (description && String(description).trim()) {
+    const metadataResult = await updateProductImageMetadata({
+      storeHash,
+      productId,
+      imageId: restoredImageId,
+      accessToken,
+      description: String(description).trim(),
+      sortOrder,
+      isThumbnail,
+    });
+
+    if (metadataResult?.error) {
+      await logRestoreActivity(
+        effectiveLogContext,
+        { storeHash, productId, imageId },
+        {
+          logType: "warning",
+          step: "metadata",
+          message:
+            "Restored image uploaded but BigCommerce alt text metadata update failed",
+          meta: {
+            restored_image_id: restoredImageId,
+            error: metadataResult.error,
+          },
+        }
+      );
+    }
+  }
+
   await logRestoreActivity(
     effectiveLogContext,
     { storeHash, productId, imageId },
@@ -356,7 +390,6 @@ async function restoreSingleImage({
     }
   );
 
-  const restoredImageId = restoredImage.id;
   const restoredBcUrl = resolveProductImageUrl(
     storeUrl,
     restoredImage.image_file,

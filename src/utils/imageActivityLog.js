@@ -48,7 +48,12 @@ async function appendImageLog({
     });
     return { error: null };
   } catch (err) {
-    console.error("[appendImageLog]", err.message);
+    console.error("[appendImageLog]", err.message, {
+      jobUuid,
+      storeHash,
+      step,
+      logType,
+    });
     return { error: err.message };
   }
 }

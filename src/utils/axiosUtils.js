@@ -1,10 +1,8 @@
 const axios = require('axios');
-
-const defaultTimeout = 20000;
-const defaultRetries = 2; // total attempts = 1 + retries
+const config = require('../config');
 
 const instance = axios.create({
-  timeout: defaultTimeout,
+  timeout: config.http.axiosTimeoutMs,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -34,7 +32,13 @@ function isRetryableError(error) {
   );
 }
 
-async function withRetry(fn, { retries = defaultRetries, baseDelayMs = 250 } = {}) {
+async function withRetry(
+  fn,
+  {
+    retries = config.http.axiosRetries,
+    baseDelayMs = config.http.axiosRetryBaseDelayMs,
+  } = {}
+) {
   let attempt = 0;
   // attempts: 0..retries (inclusive)
   // eslint-disable-next-line no-constant-condition
@@ -89,7 +93,7 @@ async function post(url, data, headers = {}, config = {}) {
  */
 async function postFormData(url, form, headers = {}) {
   const response = await axios.post(url, form, {
-    timeout: defaultTimeout,
+    timeout: config.http.axiosTimeoutMs,
     headers: {
       Accept: 'application/json',
       ...headers,

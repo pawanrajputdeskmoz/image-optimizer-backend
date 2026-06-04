@@ -30,9 +30,6 @@ const {
   createRestoreJob,
   writeRestoreLogs,
   getRestoreJobStatus,
-  setRestoreJobItemStatus,
-  recordRestoreJobImageResult,
-  fetchRestorableImagesForStore,
   validateRestoreItemForQueue,
   appendImageLog,
   getAlreadyOptimizedImageIdSet,
@@ -44,6 +41,7 @@ const {
   compressImage,
 } = require("../../utils");
 const { performance } = require("perf_hooks");
+const config = require("../../config");
 
 
 //=======================================================
@@ -77,13 +75,13 @@ exports.fetchAllProducts = async (req, reply) => {
 
     const query = req.query || {};
     const searchKeyword =
-      typeof query.query === "string"
-        ? query.query.trim()
+      typeof query.search === "string"
+        ? query.search.trim()
         : ""
 
     const user = await User.findOne(
       { store_hash: storeHash },
-      { access_token: 1, storeUrl: 1, _id: 0 }
+      { storeUrl: 1, _id: 0 }
     ).lean();
 
     if (!user) {
@@ -94,7 +92,7 @@ exports.fetchAllProducts = async (req, reply) => {
       });
     }
 
-    const accessToken = req.accessToken || user.access_token;
+    const accessToken = req.accessToken || req.currentUser?.access_token || null
     const storeUrl = user.storeUrl || null;
 
     if (
@@ -134,7 +132,8 @@ exports.fetchAllProducts = async (req, reply) => {
         "X-Auth-Token": accessToken,
         Accept: "application/json",
         "Content-Type": "application/json",
-        timeout: 10000,
+       
+        timeout: config.api.bigCommerceTimeoutMs,
       }
     );
 
@@ -251,7 +250,7 @@ exports.fetchAllProducts = async (req, reply) => {
     const sizeByImageId =
       imageUrlItems.length > 0
         ? await getImageSizesFromUrls(imageUrlItems, {
-          concurrency: Number(process.env.IMAGE_SIZE_FETCH_CONCURRENCY) || 8,
+          concurrency: config.image.sizeFetchConcurrency,
         })
         : Object.create(null);
     const sizeFetchEnd = performance.now();
@@ -310,6 +309,10 @@ exports.fetchAllProducts = async (req, reply) => {
         optimizationStatusCounts[statusInfo.optimization_status] =
           (optimizationStatusCounts[statusInfo.optimization_status] || 0) + 1;
 
+        const rawFile = image.image_file != null ? String(image.image_file) : "";
+        image.file_display_name = rawFile
+          ? path.basename(rawFile.replace(/\\/g, "/"))
+          : null;
       }
     }
 
@@ -479,7 +482,6 @@ exports.getPreviewImgData = async (req, reply) => {
 
 // --- Image optimization (single → multiple → bulk) ---
 exports.singleImageOptimization = async (req, reply) => {
-  const singleJobUuid = crypto.randomUUID();
   let storeHash;
   let productId;
   let imageId;
@@ -491,16 +493,6 @@ exports.singleImageOptimization = async (req, reply) => {
     imageId = req.params.image_id;
     productId = body.product_id;
 
-    await appendImageLog({
-      jobUuid: singleJobUuid,
-      storeHash,
-      jobType: "single",
-      imageId,
-      productId,
-      logType: "info",
-      step: "queue",
-      message: "Single image optimization started",
-    });
 
     if (!productId) {
       return reply.status(400).send({ success: false, message: "product_id is required" });
@@ -633,20 +625,22 @@ exports.singleImageOptimization = async (req, reply) => {
       .select({ imageName: 1, altText: 1, newImageName: 1, newAltText: 1 })
       .lean();
 
+    const placement = resolveImagePlacementFields({
+      ...(bcImage || {}),
+      ...body,
+    });
+
     const { oldImageName, oldAltText, newImageName, newAltText } =
       resolveGeneratedImageMeta({
         settings,
         productContext,
+        imageId,
+        sortOrder: placement.sortOrder,
         sourceFileName: bcImage?.image_file || imageName || "image.jpg",
         fallbackImageName: imageName,
         fallbackAltText: altText,
         savedFromDb,
       });
-
-    const placement = resolveImagePlacementFields({
-      ...(bcImage || {}),
-      ...body,
-    });
 
     console.log("getting this in placement", placement);
 
@@ -726,13 +720,7 @@ exports.singleImageOptimization = async (req, reply) => {
         runAltText,
         ...placement,
       },
-      logContext: {
-        jobUuid: singleJobUuid,
-        storeHash,
-        jobType: "single",
-        productId,
-        imageId,
-      },
+      logContext: null
     });
 
     if (!result.success) {
@@ -740,17 +728,7 @@ exports.singleImageOptimization = async (req, reply) => {
       return reply.status(bcError.status).send(bcError.body);
     }
 
-    await appendImageLog({
-      jobUuid: singleJobUuid,
-      storeHash,
-      jobType: "single",
-      imageId,
-      productId,
-      logType: "info",
-      step: "complete",
-      message: "Single image optimization completed",
-      meta: { new_image_id: result.data?.new_image_id },
-    });
+
 
     return reply.status(200).send({
       success: true,
@@ -761,7 +739,7 @@ exports.singleImageOptimization = async (req, reply) => {
     console.error("[singleImageOptimization] Error:", error);
     if (storeHash) {
       await appendImageLog({
-        jobUuid: singleJobUuid,
+        jobUuid: crypto.randomUUID(),
         storeHash,
         jobType: "single",
         imageId,
@@ -859,7 +837,7 @@ exports.getOptimizationJob = async (req, reply) => {
       });
     }
 
-    if (!job) {
+    if (!job && (!logs || logs.length === 0)) {
       return reply.status(404).send({
         success: false,
         message: "Optimization job not found",
@@ -1022,7 +1000,7 @@ exports.getRestoreJob = async (req, reply) => {
       });
     }
 
-    if (!job) {
+    if (!job && (!logs || logs.length === 0)) {
       return reply.status(404).send({
         success: false,
         message: "Restore job not found",
@@ -1542,11 +1520,8 @@ async function queueBulkRestoreJobs(req, reply, jobType, itemsOverride = null) {
         index,
         productId: Number(productId),
         imageId: Number(imageId),
-        overrides: {
-          altText: item.altText ?? item.alt_text,
-          imageName: item.imageName ?? item.image_name,
-          ...resolveImagePlacementFields(item),
-        },
+        // Placement only — original alt/filename are read from ImageOldData in the worker.
+        overrides: resolveImagePlacementFields(item),
       });
     }
 

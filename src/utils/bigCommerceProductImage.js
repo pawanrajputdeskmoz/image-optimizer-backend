@@ -1,4 +1,4 @@
-const { get, put, post, postFormData, del } = require("./axiosUtils");
+const { get, put, postFormData, del } = require("./axiosUtils");
 
 const bcJsonHeaders = (accessToken) => ({
   "X-Auth-Token": accessToken,
@@ -171,43 +171,6 @@ async function verifyImageReplacement({
   return { verified: false, attempts: maxRetries };
 }
 
-async function purgeExternalCache({ productId, imageId, imageUrl }) {
-  const rawUrls = String(process.env.IMAGE_REPLACEMENT_CACHE_PURGE_URLS || "")
-    .split(",")
-    .map((url) => url.trim())
-    .filter(Boolean);
-
-  if (!rawUrls.length) {
-    return { attempted: false, purged: 0, failed: 0 };
-  }
-
-  const payload = {
-    event: "product_image_replaced",
-    product_id: productId,
-    image_id: imageId,
-    image_url: imageUrl || null,
-    occurred_at: new Date().toISOString(),
-  };
-
-  let purged = 0;
-  let failed = 0;
-
-  await Promise.all(
-    rawUrls.map(async (url) => {
-      try {
-        await post(url, payload, {
-          "Content-Type": "application/json",
-        });
-        purged += 1;
-      } catch {
-        failed += 1;
-      }
-    })
-  );
-
-  return { attempted: true, purged, failed };
-}
-
 /**
  * Upload optimized image, preserve thumbnail, delete old image, verify on BC.
  */
@@ -256,16 +219,24 @@ async function replaceProductImage({
       ? Boolean(isThumbnail)
       : Boolean(oldImage?.is_thumbnail);
 
+  const metadataUpdate = {};
+  if (description != null && String(description).trim() !== "") {
+    metadataUpdate.description = String(description).trim();
+  }
+  if (sortOrder != null && sortOrder !== "") {
+    metadataUpdate.sortOrder = sortOrder;
+  }
   if (shouldKeepThumbnail) {
+    metadataUpdate.isThumbnail = true;
+  }
+
+  if (Object.keys(metadataUpdate).length > 0) {
     await updateProductImageMetadata({
       storeHash,
       productId,
       imageId: newImageId,
       accessToken,
-      isThumbnail: true,
-      sortOrder,
-      description,
-      imageFile: fileName,
+      ...metadataUpdate,
     });
   }
 
@@ -302,6 +273,5 @@ module.exports = {
   deleteProductImage,
   updateProductImageMetadata,
   verifyImageReplacement,
-  purgeExternalCache,
   replaceProductImage,
 };

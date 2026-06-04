@@ -1,6 +1,7 @@
 const path = require("node:path");
 const fs = require("node:fs");
-const { config } = require("dotenv");
+const { config: loadEnv } = require("dotenv");
+const appConfig = require("../config");
 const { Worker } = require("bullmq");
 const { createRedisConnection } = require("../db/redis");
 const { connectMongo } = require("../db/mongo");
@@ -16,7 +17,7 @@ const {
 const envPath = [path.join(process.cwd(), ".env"), path.join(__dirname, "../.env")].find(
   (p) => fs.existsSync(p)
 );
-if (envPath) config({ path: envPath });
+if (envPath) loadEnv({ path: envPath });
 
 const connection = createRedisConnection("bullmq-image-restore-worker");
 
@@ -136,7 +137,7 @@ async function startWorker() {
     },
     {
       connection,
-      concurrency: Number(process.env.IMAGE_RESTORE_WORKER_CONCURRENCY) || 2,
+      concurrency: appConfig.workers.restoreConcurrency,
     }
   );
 

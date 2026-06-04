@@ -1,5 +1,6 @@
 const path = require("node:path");
 const fs = require("node:fs/promises");
+const config = require("../config");
 const { del } = require("./axiosUtils");
 const { deleteFile } = require("./deleteFile");
 const { downloadImage } = require("./downloadImage");
@@ -20,10 +21,7 @@ const {
   updateBigCommerceProductImageMetadata,
 } = require("../modules/imageOptimization/services");
 const { appendImageLog, resolveJobUuid } = require("./imageActivityLog");
-const {
-  replaceProductImage,
-  purgeExternalCache,
-} = require("./bigCommerceProductImage");
+const { replaceProductImage } = require("./bigCommerceProductImage");
 
 async function logCompressActivity(
   logContext,
@@ -41,7 +39,7 @@ async function logCompressActivity(
     ...logContext,
   };
 
-  await appendImageLog({
+  const { error } = await appendImageLog({
     jobUuid: resolveJobUuid(ctx, ctx.storeHash),
     storeHash: ctx.storeHash,
     jobType: ctx.jobType,
@@ -49,6 +47,9 @@ async function logCompressActivity(
     productId: productId ?? ctx.productId,
     ...payload,
   });
+  if (error) {
+    console.warn("[logCompressActivity]", error, { step: payload?.step });
+  }
 }
 
 /**
@@ -294,7 +295,7 @@ exports.compressImage = async ({
     const fileBuf = await fs.readFile(optimizedImage.outputPath);
     const uploadFileName =
       runFilename && newImageName && String(newImageName).trim()
-        ? String(newImageName).trim()
+        ? path.basename(String(newImageName).trim())
         : path.basename(optimizedImage.outputPath);
     const uploadDescription =
       runAltText && newAltText && String(newAltText).trim()
@@ -379,8 +380,8 @@ exports.compressImage = async ({
     }
 
     const sizeFetchOptions = {
-      retries: Number(process.env.BC_IMAGE_SIZE_FETCH_RETRIES) || 4,
-      retryDelayMs: Number(process.env.BC_IMAGE_SIZE_FETCH_DELAY_MS) || 750,
+      retries: config.image.sizeFetchRetries,
+      retryDelayMs: config.image.sizeFetchRetryDelayMs,
     };
 
     const [originalFromBc, optimizedFromBc] = await Promise.all([
@@ -434,24 +435,6 @@ exports.compressImage = async ({
       },
       compression: { savedBytes, savedPercent },
     };
-
-    const purgeResult = await purgeExternalCache({
-      productId,
-      imageId: newImageId,
-      imageUrl: optimizedBcUrl,
-    });
-    await logCompressActivity(
-      effectiveLogContext,
-      { storeHash, productId, imageId },
-      {
-        logType: purgeResult.failed > 0 ? "warning" : "info",
-        step: "complete",
-        message: purgeResult.attempted
-          ? "External cache purge completed"
-          : "External cache purge skipped (no endpoints configured)",
-        meta: purgeResult,
-      }
-    );
 
     await ImageOptimization.updateOne(
       { _id: imageOptimizationDoc._id },

@@ -1,6 +1,7 @@
 const path = require("node:path");
 const fs = require("node:fs");
-const { config } = require("dotenv");
+const { config: loadEnv } = require("dotenv");
+const appConfig = require("../config");
 const { Worker } = require("bullmq");
 const { createRedisConnection } = require("../db/redis");
 const { connectMongo } = require("../db/mongo");
@@ -17,7 +18,7 @@ const {
 const envPath = [path.join(process.cwd(), ".env"), path.join(__dirname, "../.env")].find(
   (p) => fs.existsSync(p)
 );
-if (envPath) config({ path: envPath });
+if (envPath) loadEnv({ path: envPath });
 
 const connection = createRedisConnection("bullmq-image-optimization-worker");
 
@@ -93,13 +94,18 @@ async function startWorker() {
             reason || "Image is already optimized or currently optimizing";
 
           if (jobUuid) {
-            await setJobItemStatus({
+            const { error: recordError } = await recordOptimizationJobImageResult({
               jobUuid,
-              productId,
+              storeHash,
+              skipped: true,
+              skipReason: skipMessage,
               imageId,
-              status: "skipped",
-              errorMessage: skipMessage,
+              productId,
+              jobType,
             });
+            if (recordError) {
+              console.error("[image-optimization-worker] skip record:", recordError);
+            }
           }
 
           return {
@@ -199,7 +205,7 @@ async function startWorker() {
     },
     {
       connection,
-      concurrency: Number(process.env.IMAGE_OPTIMIZATION_WORKER_CONCURRENCY) || 2,
+      concurrency: appConfig.workers.optimizationConcurrency,
     }
   );
 
@@ -224,7 +230,7 @@ async function startWorker() {
     const data = job?.data;
     if (data?.storeHash) {
       await appendImageLog({
-        jobUuid: data.jobUuid,
+        jobUuid: data.jobUuid || data.job_uuid,
         storeHash: data.storeHash,
         jobType: data.job_type || data.type || "bulk",
         imageId: data.imageId,

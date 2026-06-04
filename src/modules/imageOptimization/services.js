@@ -18,24 +18,18 @@ const {
 } = require("../../utils/restoreImage");
 const ImageOldData = require("../../models/ImageOldData");
 const { get } = require("../../utils/axiosUtils");
+const { resolveOptimizeFormat } = require("../../utils/sharpFunction");
 const {
   updateProductImageMetadata,
 } = require("../../utils/bigCommerceProductImage");
 const { resolveProductImageUrl } = require("../../utils/urls");
 const { appendImageLog } = require("../../utils/imageActivityLog");
-const DEFAULT_STORE_SETTINGS = {
-  optimize_image_enabled: true,
-  is_filename_template_enabled: false,
-  filename_template: "[name]",
-  is_alt_text_template_enabled: false,
-  alt_text_template: "[name]",
-  image_quality: 80,
-  output_format: "jpeg",
-};
+const config = require("../../config");
+const { storeDefaults: DEFAULT_STORE_SETTINGS } = config;
 
 /** Tokens allowed in filename_template / alt_text_template (case-insensitive in brackets). */
 const TEMPLATE_TOKEN_RE =
-  /\[(name|sku|brand|mpn|page_title|price|type|condition|category|currency|store_name)\]/gi;
+  /\[(name|sku|brand|mpn|page_title|price|type|condition|category|currency|store_name|image_name|image_file|sort_order|image_id)\]/gi;
 
 const bcJsonHeaders = (accessToken) => ({
   "X-Auth-Token": accessToken,
@@ -141,17 +135,43 @@ exports.sanitizeImageFileName = (name) => {
   return cleaned || "image";
 };
 
-exports.buildFilenameFromTemplate = (template, context, sourceFileName = "image.jpg") => {
-  const ext = path.extname(sourceFileName || "") || ".jpg";
+exports.buildFilenameFromTemplate = (
+  template,
+  context,
+  sourceFileName = "image.jpg",
+  outputFormat = null
+) => {
+  let ext = path.extname(sourceFileName || "") || ".jpg";
+  const fmt = outputFormat != null ? resolveOptimizeFormat(outputFormat) : null;
+  if (fmt && fmt !== "original") {
+    ext = fmt === "jpeg" ? ".jpg" : `.${fmt}`;
+  }
   const base = exports.applyImageTemplate(template, context);
   const sanitized = exports.sanitizeImageFileName(base);
   return `${sanitized}${ext}`;
 };
 
+exports.buildImageTemplateContext = (
+  productContext,
+  { imageId = null, sourceFileName = "image.jpg", sortOrder = null } = {}
+) => {
+  const file = String(sourceFileName || "image.jpg").trim() || "image.jpg";
+  const base = path.basename(file);
+  const ext = path.extname(base);
+  const imageName = (ext ? base.slice(0, -ext.length) : base) || "image";
+
+  return {
+    ...(productContext || {}),
+    image_name: imageName,
+    image_file: base,
+    sort_order: sortOrder != null && sortOrder !== "" ? String(sortOrder) : "",
+    image_id: imageId != null && imageId !== "" ? String(imageId) : "",
+  };
+};
+
 /**
- * Product + store fields for filename / alt templates, e.g.
- * [name], [sku], [brand], [mpn], [page_title], [price], [type], [condition],
- * [category], [currency], [store_name]
+ * Product + per-image fields for templates, e.g.
+ * [name], [sku], [image_name], [image_id], [sort_order], …
  *
  * `options` is merged last so callers can override any field (e.g. from cache).
  */
@@ -233,6 +253,8 @@ exports.fetchProductTemplateContext = async (
 exports.resolveGeneratedImageMeta = ({
   settings,
   productContext,
+  imageId = null,
+  sortOrder = null,
   sourceFileName,
   fallbackImageName,
   fallbackAltText,
@@ -245,28 +267,44 @@ exports.resolveGeneratedImageMeta = ({
 
   const oldImageName = fallbackImageName || dbFileName || null;
   const oldAltText = fallbackAltText || dbAltText || null;
+  const fileForTemplate = sourceFileName || oldImageName || "image.jpg";
+
+  const templateContext = exports.buildImageTemplateContext(productContext, {
+    imageId,
+    sourceFileName: fileForTemplate,
+    sortOrder,
+  });
 
   let newImageName;
   let newAltText;
 
   if (settings.is_filename_template_enabled && productContext) {
+    const filenameTemplate = settings.filename_template || "";
     newImageName = exports.buildFilenameFromTemplate(
-      settings.filename_template,
-      productContext,
-      sourceFileName || oldImageName || "image.jpg"
+      filenameTemplate,
+      templateContext,
+      fileForTemplate,
+      settings.output_format
     );
+    const imageIdStr = String(templateContext.image_id || "").trim();
+    const hasUniqueImageToken = /\[(image_id|image_name|image_file)\]/i.test(
+      filenameTemplate
+    );
+    if (imageIdStr && !hasUniqueImageToken) {
+      const ext = path.extname(newImageName) || ".jpg";
+      const base = ext ? newImageName.slice(0, -ext.length) : newImageName;
+      newImageName = `${base}-${imageIdStr}${ext}`;
+    }
   } else {
-    // Template off → keep last saved filename from DB, then BC fallback
     newImageName = dbFileName || oldImageName;
   }
 
   if (settings.is_alt_text_template_enabled && productContext) {
     newAltText = exports.applyImageTemplate(
-      settings.alt_text_template,
-      productContext
+      settings.alt_text_template || "",
+      templateContext
     );
   } else {
-    // Template off → keep last saved alt text from DB, then BC fallback
     newAltText = dbAltText || oldAltText;
   }
 
@@ -391,6 +429,11 @@ exports.buildJobImageMeta = async ({
     .select({ imageName: 1, altText: 1, newImageName: 1, newAltText: 1 })
     .lean();
 
+  const placement = exports.resolveImagePlacementFields({
+    ...(bcImage || {}),
+    ...placementOverrides,
+  });
+
   const fallbackImageName = bcImage?.image_file || bcImage?.name || null;
   const fallbackAltText =
     bcImage?.description || bcImage?.alt_text || null;
@@ -399,16 +442,13 @@ exports.buildJobImageMeta = async ({
     exports.resolveGeneratedImageMeta({
       settings,
       productContext,
+      imageId,
+      sortOrder: placement.sortOrder,
       sourceFileName: bcImage?.image_file || "image.jpg",
       fallbackImageName,
       fallbackAltText,
       savedFromDb,
     });
-
-  const placement = exports.resolveImagePlacementFields({
-    ...(bcImage || {}),
-    ...placementOverrides,
-  });
 
   return {
     oldImageName,
@@ -423,7 +463,6 @@ exports.buildJobImageMeta = async ({
 };
 
 const SKIP_QUEUE_STATUSES = new Set(["optimized", "optimizing"]);
-const DEFAULT_CATALOG_PAGE_SIZE = 50;
 
 /**
  * Image IDs that should not be queued again (already done or in progress).
@@ -477,24 +516,6 @@ exports.getAlreadyOptimizedImageIdSet = async (storeHash, imageIdsOrItems = []) 
     );
   }
 
-  if (imageIds.size > 0 || productIds.size > 0) {
-    const optQuery = { store_hash: storeHash };
-    if (imageIds.size > 0 && productIds.size > 0) {
-      optQuery.$or = [
-        { image_id: { $in: [...imageIds] } },
-        { product_id: { $in: [...productIds] } },
-      ];
-    } else if (imageIds.size > 0) {
-      optQuery.image_id = { $in: [...imageIds] };
-    } else {
-      optQuery.product_id = { $in: [...productIds] };
-    }
-
-    queries.push(
-      ImageOptimization.find(optQuery).select({ image_id: 1 }).lean()
-    );
-  }
-
   const resultGroups = await Promise.all(queries);
   for (const rows of resultGroups) {
     for (const row of rows) {
@@ -542,22 +563,6 @@ exports.shouldSkipImageOptimization = async (
     };
   }
 
-  const optQuery = { store_hash: storeHash, image_id: iid };
-  if (Number.isFinite(pid)) {
-    optQuery.product_id = pid;
-  }
-
-  const optimizationRow = await ImageOptimization.findOne(optQuery)
-    .select({ image_id: 1 })
-    .lean();
-
-  if (optimizationRow) {
-    return {
-      skip: true,
-      reason: "Image is already optimized",
-    };
-  }
-
   return { skip: false, reason: null };
 };
 
@@ -569,7 +574,7 @@ exports.fetchAllCatalogImagesInChunks = async ({
   storeHash,
   accessToken,
   storeUrl,
-  pageSize = DEFAULT_CATALOG_PAGE_SIZE,
+  pageSize = config.catalog.pageSize,
   keyword = "",
   skipOptimized = true,
 }) => {
@@ -595,7 +600,7 @@ exports.fetchAllCatalogImagesInChunks = async ({
 
   const limit = Math.min(
     250,
-    Math.max(1, Number(pageSize) || DEFAULT_CATALOG_PAGE_SIZE)
+    Math.max(1, Number(pageSize) || config.catalog.pageSize)
   );
   const headers = bcJsonHeaders(accessToken);
   const items = [];
@@ -762,8 +767,12 @@ exports.buildBigCommerceError = (error) => {
 };
 
 exports.normalizePagination = (query = {}) => {
-  const page = Math.max(1, parseInt(query.page, 10) || 1);
-  const limit = Math.max(1, Math.min(20, parseInt(query.limit, 10) || 5));
+  const { defaultPage, defaultLimit, maxLimit } = config.pagination;
+  const page = Math.max(1, parseInt(query.page, 10) || defaultPage);
+  const limit = Math.max(
+    1,
+    Math.min(maxLimit, parseInt(query.limit, 10) || defaultLimit)
+  );
   return { page, limit };
 };
 
@@ -934,6 +943,12 @@ exports.setJobItemStatus = async ({
     $set.error_message = errorMessage || "Image optimization failed";
   }
 
+  if (status === "skipped") {
+    $set.completed_at = new Date();
+    $set.skip_reason = errorMessage || "Skipped";
+    $set.error_message = null;
+  }
+
   try {
     await ImageJobItem.updateOne(buildItemFilter(jobUuid, productId, imageId), {
       $set,
@@ -946,13 +961,15 @@ exports.setJobItemStatus = async ({
 
 exports.getOptimizationJobStatus = async (jobUuid, storeHash) => {
   const query = { job_uuid: jobUuid };
+  const logQuery = { job_uuid: jobUuid };
   if (storeHash) {
     query.store_hash = storeHash;
+    logQuery.store_hash = storeHash;
   }
 
   const [job, logs, items] = await Promise.all([
     ImageJob.findOne(query).lean(),
-    ImageOptimizationLog.find({ job_uuid: jobUuid })
+    ImageOptimizationLog.find(logQuery)
       .sort({ created_at: -1 })
       .limit(200)
       .lean(),
@@ -960,7 +977,7 @@ exports.getOptimizationJobStatus = async (jobUuid, storeHash) => {
   ]);
 
   if (!job) {
-    return { error: null, job: null, logs: [], items: [] };
+    return { error: null, job: null, logs, items };
   }
 
   const queued = getQueuedImageCount(job);
@@ -981,6 +998,8 @@ exports.recordOptimizationJobImageResult = async ({
   jobUuid,
   storeHash: storeHashHint = null,
   success,
+  skipped = false,
+  skipReason = null,
   imageId = null,
   productId = null,
   errorMessage = null,
@@ -992,8 +1011,13 @@ exports.recordOptimizationJobImageResult = async ({
     return { error: "jobUuid is required", job: null };
   }
 
-  const itemStatus = success ? "optimized" : "failed";
   const validJobType = normalizeJobType(jobTypeHint) || "bulk";
+  const itemStatus = skipped ? "skipped" : success ? "optimized" : "failed";
+  const itemMessage = skipped
+    ? skipReason || "Image skipped"
+    : success
+      ? null
+      : errorMessage || "Image optimization failed";
 
   try {
     const itemUpdate = ImageJobItem.updateOne(
@@ -1002,9 +1026,14 @@ exports.recordOptimizationJobImageResult = async ({
         $set: {
           status: itemStatus,
           completed_at: new Date(),
-          error_message: success
-            ? null
-            : errorMessage || "Image optimization failed",
+          ...(skipped
+            ? {
+                skip_reason: itemMessage,
+                error_message: null,
+              }
+            : {
+                error_message: itemMessage,
+              }),
           ...(success && savedBytes != null ? { saved_bytes: savedBytes } : {}),
           ...(success && savedPercentage != null
             ? { saved_percentage: savedPercentage }
@@ -1018,7 +1047,11 @@ exports.recordOptimizationJobImageResult = async ({
       {
         $inc: {
           processed_images: 1,
-          ...(success ? { success_images: 1 } : { failed_images: 1 }),
+          ...(skipped
+            ? { skipped_images: 1 }
+            : success
+              ? { success_images: 1 }
+              : { failed_images: 1 }),
         },
       },
       { returnDocument: "after" }
@@ -1041,13 +1074,15 @@ exports.recordOptimizationJobImageResult = async ({
           jobType: validJobType,
           imageId,
           productId,
-          logType: success ? "info" : "error",
-          step: success ? "optimize" : "optimize_failed",
-          message: success
-            ? "Image optimized successfully"
-            : errorMessage || "Image optimization failed",
+          logType: skipped ? "warning" : success ? "info" : "error",
+          step: skipped ? "skip" : success ? "optimize" : "optimize_failed",
+          message: skipped
+            ? itemMessage
+            : success
+              ? "Image optimized successfully"
+              : errorMessage || "Image optimization failed",
           meta: {
-            ...(success ? {} : { error: errorMessage }),
+            ...(skipped || success ? {} : { error: errorMessage }),
             job_record_missing: true,
             ...(success && savedBytes != null ? { saved_bytes: savedBytes } : {}),
             ...(success && savedPercentage != null
@@ -1074,19 +1109,23 @@ exports.recordOptimizationJobImageResult = async ({
         job_type: job.job_type || validJobType,
         image_id: imageId,
         product_id: productId,
-        log_type: success ? "info" : "error",
-        step: success ? "optimize" : "optimize_failed",
-        message: success
-          ? "Image optimized successfully"
-          : errorMessage || "Image optimization failed",
-        meta: success
-          ? {
-              ...(savedBytes != null ? { saved_bytes: savedBytes } : {}),
-              ...(savedPercentage != null
-                ? { saved_percentage: savedPercentage }
-                : {}),
-            }
-          : { error: errorMessage },
+        log_type: skipped ? "warning" : success ? "info" : "error",
+        step: skipped ? "skip" : success ? "optimize" : "optimize_failed",
+        message: skipped
+          ? itemMessage
+          : success
+            ? "Image optimized successfully"
+            : errorMessage || "Image optimization failed",
+        meta: skipped
+          ? {}
+          : success
+            ? {
+                ...(savedBytes != null ? { saved_bytes: savedBytes } : {}),
+                ...(savedPercentage != null
+                  ? { saved_percentage: savedPercentage }
+                  : {}),
+              }
+            : { error: errorMessage },
       }),
     ];
 
@@ -1251,13 +1290,15 @@ exports.setRestoreJobItemStatus = async ({
 
 exports.getRestoreJobStatus = async (jobUuid, storeHash) => {
   const query = { job_uuid: jobUuid };
+  const logQuery = { job_uuid: jobUuid };
   if (storeHash) {
     query.store_hash = storeHash;
+    logQuery.store_hash = storeHash;
   }
 
   const [job, logs, items] = await Promise.all([
     ImageJob.findOne(query).lean(),
-    ImageOptimizationLog.find({ job_uuid: jobUuid })
+    ImageOptimizationLog.find(logQuery)
       .sort({ created_at: -1 })
       .limit(200)
       .lean(),
@@ -1265,7 +1306,7 @@ exports.getRestoreJobStatus = async (jobUuid, storeHash) => {
   ]);
 
   if (!job) {
-    return { error: null, job: null, logs: [], items: [] };
+    return { error: null, job: null, logs, items };
   }
 
   const queued = getQueuedImageCount(job);
