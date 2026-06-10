@@ -1,3 +1,37 @@
+const commonContextProperties = {
+  shop: { type: "string" },
+  channel_id: { type: ["integer", "string"] },
+  store_id: { type: "string" },
+  store_hash: { type: "string" },
+};
+
+const fetchAllProductsSchema = {
+  body: {
+    type: "object",
+    required: ["channel_id"],
+    additionalProperties: true,
+    properties: {
+      ...commonContextProperties,
+      page: { type: ["integer", "string"] },
+      limit: { type: ["integer", "string"] },
+    },
+  },
+};
+
+const sharedImagePayloadProperties = {
+  ...commonContextProperties,
+  product_id: { type: ["integer", "string"] },
+  image_id: { type: ["integer", "string"] },
+  image_url: { type: "string" },
+  sort_order: { type: ["integer", "string"] },
+  is_thumbnail: { type: ["boolean", "string", "integer"] },
+  is_thumnail: { type: ["boolean", "string", "integer"] },
+  imageName: { type: "string" },
+  image_name: { type: "string" },
+  altText: { type: "string" },
+  alt_text: { type: "string" },
+};
+
 const singleImageOptimizationSchema = {
   params: {
     type: "object",
@@ -8,27 +42,11 @@ const singleImageOptimizationSchema = {
       },
     },
   },
-
   body: {
     type: "object",
-    required: ["product_id"],
-    additionalProperties: false,
-    properties: {
-      product_id: {
-        type: ["integer", "string"],
-      },
-      image_url: {
-        type: "string",
-        minLength: 1,
-      },
-      imageName: { type: "string" },
-      image_name: { type: "string" },
-      altText: { type: "string" },
-      alt_text: { type: "string" },
-      sort_order: { type: ["integer", "string"] },
-      is_thumbnail: { type: ["boolean", "string"] },
-      is_thumnail: { type: ["boolean", "string"] },
-    },
+    required: ["product_id", "channel_id"],
+    additionalProperties: true,
+    properties: sharedImagePayloadProperties,
   },
 };
 
@@ -36,8 +54,9 @@ const getPreviewImgDataSchema = {
   body: {
     type: "object",
     required: ["image_id"],
-    additionalProperties: false,
+    additionalProperties: true,
     properties: {
+      ...commonContextProperties,
       image_id: {
         type: ["integer", "string"],
       },
@@ -60,9 +79,10 @@ const updateAltTextSchema = {
   },
   body: {
     type: "object",
-    required: ["product_id", "alt_text"],
-    additionalProperties: false,
+    required: ["product_id", "alt_text", "channel_id"],
+    additionalProperties: true,
     properties: {
+      ...commonContextProperties,
       product_id: {
         type: ["integer", "string"],
       },
@@ -71,8 +91,8 @@ const updateAltTextSchema = {
         maxLength: 500,
       },
       sort_order: { type: ["integer", "string"] },
-      is_thumbnail: { type: ["boolean", "string"] },
-      is_thumnail: { type: ["boolean", "string"] },
+      is_thumbnail: { type: ["boolean", "string", "integer"] },
+      is_thumnail: { type: ["boolean", "string", "integer"] },
     },
   },
 };
@@ -83,54 +103,30 @@ const bulkImageOptimizationSchema = {
     minItems: 1,
     items: {
       type: "object",
-      required: ["product_id", "image_url", "image_id"],
-      properties: {
-        image_id: { type: ["integer", "string"] },
-        product_id: { type: ["integer", "string"] },
-        image_url: { type: "string", minLength: 1 },
-        shop: { type: "string" },
-        channel_id: { type: ["integer", "string"] },
-        store_id: { type: "string" },
-        sort_order: { type: ["integer", "string"] },
-        is_thumbnail: { type: ["boolean", "string"] },
-      
-      },
+      required: ["product_id", "image_url", "image_id", "channel_id"],
+      additionalProperties: true,
+      properties: sharedImagePayloadProperties,
     },
   },
 };
 
-/** Full-store bulk: empty body; store from auth (same as other store-scoped APIs). */
 const bulkImageOptimizationAllSchema = {
   body: {
     type: "object",
-    additionalProperties: false,
-    properties: {},
+    additionalProperties: true,
+    properties: commonContextProperties,
   },
 };
 
-/** Same catalog row shape as bulk-image-optimization; image_url is optional for restore. */
 const bulkRestoreSchema = {
   body: {
     type: "array",
     minItems: 1,
     items: {
       type: "object",
-      required: ["product_id", "image_id"],
-      properties: {
-        image_id: { type: ["integer", "string"] },
-        product_id: { type: ["integer", "string"] },
-        image_url: { type: "string" },
-        shop: { type: "string" },
-        channel_id: { type: ["integer", "string"] },
-        store_id: { type: "string" },
-        imageName: { type: "string" },
-        image_name: { type: "string" },
-        altText: { type: "string" },
-        alt_text: { type: "string" },
-        sort_order: { type: ["integer", "string"] },
-        is_thumbnail: { type: ["boolean", "string"] },
-        is_thumnail: { type: ["boolean", "string"] },
-      },
+      required: ["product_id", "image_id", "channel_id"],
+      additionalProperties: true,
+      properties: sharedImagePayloadProperties,
     },
   },
 };
@@ -138,8 +134,8 @@ const bulkRestoreSchema = {
 const bulkRestoreAllSchema = {
   body: {
     type: "object",
-    additionalProperties: false,
-    properties: {},
+    additionalProperties: true,
+    properties: commonContextProperties,
   },
 };
 
@@ -155,30 +151,14 @@ const restoreImageSchema = {
   },
   body: {
     type: "object",
-    required: ["product_id"],
-    additionalProperties: false,
-    properties: {
-      product_id: {
-        type: ["integer", "string"],
-      },
-      image_url: {
-        type: "string",
-      },
-      shop: { type: "string" },
-      channel_id: { type: ["integer", "string"] },
-      store_id: { type: "string" },
-      imageName: { type: "string" },
-      image_name: { type: "string" },
-      altText: { type: "string" },
-      alt_text: { type: "string" },
-      sort_order: { type: ["integer", "string"] },
-      is_thumbnail: { type: ["boolean", "string"] },
-      is_thumnail: { type: ["boolean", "string"] },
-    },
+    required: ["product_id", "channel_id"],
+    additionalProperties: true,
+    properties: sharedImagePayloadProperties,
   },
 };
 
 module.exports = {
+  fetchAllProductsSchema,
   singleImageOptimizationSchema,
   bulkImageOptimizationSchema,
   bulkImageOptimizationAllSchema,

@@ -40,6 +40,11 @@ const {
   resolveProductImageUrl,
   compressImage,
 } = require("../../utils");
+const {
+  parseChannelId,
+  normalizeImageFile,
+  resolveChannelSiteUrl,
+} = require("../../utils/channelContext");
 const { performance } = require("perf_hooks");
 const config = require("../../config");
 
@@ -61,12 +66,19 @@ exports.fetchAllProducts = async (req, reply) => {
 
     const body = req.body || {};
     const storeHash = req.storeHash;
-
+    const channelId = parseChannelId(body);
 
     if (!storeHash) {
       return reply.status(400).send({
         success: false,
         message: "store_hash is required in body or query",
+      });
+    }
+
+    if (!channelId) {
+      return reply.status(400).send({
+        success: false,
+        message: "channel_id is required and must be a positive number",
       });
     }
 
@@ -115,26 +127,38 @@ exports.fetchAllProducts = async (req, reply) => {
     const params = new URLSearchParams({
       include: "images",
       include_fields:
-        "id,name,page_title,price,images",
+        "id,name,page_title,price,images,custom_url",
       page: String(page),
       limit: String(limit),
+      "channel_id:in": String(channelId),
     });
 
     if (searchKeyword) {
       params.set("keyword", searchKeyword);
     }
 
+    const bcHeaders = {
+      "X-Auth-Token": accessToken,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    };
+    const bcConfig = { timeout: config.api.bigCommerceTimeoutMs };
+
+    let imageBaseUrl = storeUrl;
+
+    imageBaseUrl = await resolveChannelSiteUrl(
+      storeHash,
+      channelId,
+      accessToken,
+      storeUrl
+    );
+
     const bcStart = performance.now();
 
     const response = await get(
       `https://api.bigcommerce.com/stores/${storeHash}/v3/catalog/products?${params.toString()}`,
-      {
-        "X-Auth-Token": accessToken,
-        Accept: "application/json",
-        "Content-Type": "application/json",
-       
-        timeout: config.api.bigCommerceTimeoutMs,
-      }
+      bcHeaders,
+      bcConfig
     );
 
     const bcEnd = performance.now();
@@ -235,7 +259,7 @@ exports.fetchAllProducts = async (req, reply) => {
       for (let j = 0; j < images.length; j++) {
         const image = images[j];
         const url = resolveProductImageUrl(
-          storeUrl,
+          imageBaseUrl,
           image.image_file,
           image.url_zoom || null
         );
@@ -263,16 +287,37 @@ exports.fetchAllProducts = async (req, reply) => {
 
     /**
      * ------------------------------------------------
-     * 9. Attach Optimization Status + Size
+     * 9. Build storefront product URLs (SEO custom paths)
      * ------------------------------------------------
      */
 
-    const optimizationStatusCounts =
-      Object.create(null);
+    const storefrontBase = imageBaseUrl
+      ? String(imageBaseUrl).replace(/\/$/, "")
+      : "";
 
     for (let i = 0; i < products.length; i++) {
       const product = products[i];
+      const customPath =
+        product?.custom_url?.url != null
+          ? String(product.custom_url.url).trim()
+          : "";
 
+      if (storefrontBase && customPath) {
+        const normalizedPath = customPath.startsWith("/")
+          ? customPath
+          : `/${customPath}`;
+        product.storefront_url = `${storefrontBase}${normalizedPath}`;
+      }
+    }
+
+    /**
+     * ------------------------------------------------
+     * 10. Attach Optimization Status + Size
+     * ------------------------------------------------
+     */
+
+    for (let i = 0; i < products.length; i++) {
+      const product = products[i];
       const images = product.images;
 
       if (!Array.isArray(images) || images.length === 0) {
@@ -287,7 +332,13 @@ exports.fetchAllProducts = async (req, reply) => {
           image_update_status: "pending",
         };
 
-        image.optimization_status = statusInfo.optimization_status;
+        const rawStatus = String(statusInfo.optimization_status || "pending");
+        image.product_id = product.id;
+        image.image_file = normalizeImageFile(image.image_file);
+        image.optimization_status =
+          rawStatus === "optimized" || rawStatus === "complete"
+            ? "optimized"
+            : rawStatus;
         image.image_update_status = statusInfo.image_update_status;
 
         const sizeInfo = sizeByImageId[image.id];
@@ -304,15 +355,6 @@ exports.fetchAllProducts = async (req, reply) => {
             height: null,
             format: null,
           };
-
-
-        optimizationStatusCounts[statusInfo.optimization_status] =
-          (optimizationStatusCounts[statusInfo.optimization_status] || 0) + 1;
-
-        const rawFile = image.image_file != null ? String(image.image_file) : "";
-        image.file_display_name = rawFile
-          ? path.basename(rawFile.replace(/\\/g, "/"))
-          : null;
       }
     }
 
@@ -339,28 +381,8 @@ exports.fetchAllProducts = async (req, reply) => {
     return reply.status(200).send({
       success: true,
       message: "Products fetched successfully",
-
       data: products,
-
-      pagination:
-        response?.meta?.pagination || null,
-
-      meta: {
-        optimization_status_counts:
-          optimizationStatusCounts,
-
-        performance: {
-          total_api_time_ms:
-            Number(
-              (apiEnd - apiStart).toFixed(2)
-            ),
-
-          bigcommerce_time_ms:
-            Number(
-              (bcEnd - bcStart).toFixed(2)
-            ),
-        },
-      },
+      pagination: response?.meta?.pagination || null,
     });
   } catch (error) {
     console.error(
@@ -458,8 +480,14 @@ exports.getPreviewImgData = async (req, reply) => {
       data: {
         image_id: imageId,
         product_id: imageOptimization?.product_id ?? imageOldData?.product_id ?? productId,
-        optimization: imageOptimization || null,
-        oldData: imageOldData || null,
+        oldData: imageOldData
+          ? {
+              imageName: imageOldData.imageName || "",
+              altText: imageOldData.altText || "",
+              original: imageOldData.original || { size: null },
+              optimized: imageOldData.optimized || { size: null },
+            }
+          : null,
         files: {
           original: originalPath,
           optimized: optimizedPath,
@@ -489,10 +517,10 @@ exports.singleImageOptimization = async (req, reply) => {
   try {
     const body = req.body || {};
     storeHash = req.storeHash;
-    const storeUrl = req.currentUser?.storeUrl || null;
+    const channelId = parseChannelId(body) || 1;
+    let storeUrl = req.currentUser?.storeUrl || null;
     imageId = req.params.image_id;
     productId = body.product_id;
-
 
     if (!productId) {
       return reply.status(400).send({ success: false, message: "product_id is required" });
@@ -506,7 +534,17 @@ exports.singleImageOptimization = async (req, reply) => {
       });
     }
 
-    const { error: settingError, settings } = await fetchStoreOptimizationSettings(storeHash);
+    storeUrl = await resolveChannelSiteUrl(
+      storeHash,
+      channelId,
+      accessToken,
+      storeUrl
+    );
+
+    const { error: settingError, settings } = await fetchStoreOptimizationSettings(
+      storeHash,
+      channelId
+    );
     if (settingError) {
       return reply.status(500).send({ success: false, message: settingError });
     }
@@ -560,7 +598,9 @@ exports.singleImageOptimization = async (req, reply) => {
 
     let imageUrl = resolveProductImageUrl(
       storeUrl,
-      typeof body.image_url === "string" ? body.image_url.trim() : ""
+      normalizeImageFile(
+        typeof body.image_url === "string" ? body.image_url.trim() : ""
+      )
     );
     let imageName = body.imageName || body.image_name || null;
     let altText = body.altText || body.alt_text || null;
@@ -732,8 +772,8 @@ exports.singleImageOptimization = async (req, reply) => {
 
     return reply.status(200).send({
       success: true,
-      message: "Image optimized and replaced successfully",
-      data: { ...result.data, },
+      message: "Image optimized",
+      data: { ...result.data },
     });
   } catch (error) {
     console.error("[singleImageOptimization] Error:", error);
@@ -780,8 +820,10 @@ exports.bulkImageOptimization = async (req, reply) => {
       });
     }
 
+    const channelId = parseChannelId(req.body) || 1;
+
     const { error: settingError, settings } =
-      await fetchStoreOptimizationSettings(storeHash);
+      await fetchStoreOptimizationSettings(storeHash, channelId);
     if (settingError) {
       return reply.status(500).send({ success: false, message: settingError });
     }
@@ -861,7 +903,8 @@ exports.getOptimizationJob = async (req, reply) => {
 exports.restoreImage = async (req, reply) => {
   try {
     const storeHash = req.storeHash;
-    const storeUrl = req.currentUser?.storeUrl || null;
+    const channelId = parseChannelId(req.body) || 1;
+    let storeUrl = req.currentUser?.storeUrl || null;
     const accessToken = req.accessToken || req.currentUser?.access_token || null;
     const imageId = Number(req.params.image_id);
     const productId = Number(req.body.product_id);
@@ -892,6 +935,15 @@ exports.restoreImage = async (req, reply) => {
         success: false,
         message: "storeUrl is missing. Reinstall app to save store URL.",
       });
+    }
+
+    if (accessToken && String(accessToken).trim()) {
+      storeUrl = await resolveChannelSiteUrl(
+        storeHash,
+        channelId,
+        accessToken,
+        storeUrl
+      );
     }
 
     const placement = resolveImagePlacementFields(req.body || {});
@@ -1085,12 +1137,6 @@ exports.updateAltText = async (req, reply) => {
     return reply.status(200).send({
       success: true,
       message: "Alt text updated",
-      data: {
-        image_id: Number(imageId),
-        product_id: Number(productId),
-        alt_text: altText,
-        bigcommerce: result,
-      },
     });
   } catch (error) {
     const bcError = buildBigCommerceError(error);
@@ -1136,8 +1182,10 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
       });
     }
 
+    const channelId = parseChannelId(items[0]) || parseChannelId(req.body) || 1;
+
     const { error: settingError, settings } =
-      await fetchStoreOptimizationSettings(storeHash);
+      await fetchStoreOptimizationSettings(storeHash, channelId);
     if (settingError) {
       return reply.status(500).send({ success: false, message: settingError });
     }
@@ -1397,8 +1445,12 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
 
     return reply.status(202).send({
       success: true,
-      message: "Bulk image optimization jobs queued",
-      data: responseData,
+      message: "Bulk optimization queued",
+      data: {
+        job_uuid: jobUuid,
+        queued: jobs.length,
+        skipped: skipped.length,
+      },
     });
   } catch (error) {
     console.error("[queueBulkImageJobs] Error:", error);
@@ -1620,8 +1672,7 @@ async function queueBulkRestoreJobs(req, reply, jobType, itemsOverride = null) {
 
     return reply.status(202).send({
       success: true,
-      message: "Bulk image restore jobs queued",
-      data: responseData,
+      message: "Images restored",
     });
   } catch (error) {
     console.error("[queueBulkRestoreJobs] Error:", error);

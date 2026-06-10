@@ -1,5 +1,6 @@
 const jwt = require("jsonwebtoken");
 const { User } = require("../models");
+const { parseChannelId } = require("../utils/channelContext");
 
 async function authStore(req, reply) {
   try {
@@ -45,6 +46,9 @@ async function authStore(req, reply) {
     req.storeHash = storeHash;
     req.accessToken = accessToken;
     req.currentUser = user;
+    req.channelId = parseChannelId({
+      channel_id: req.query?.channel_id ?? req.body?.channel_id,
+    });
   } catch (error) {
     return reply.status(401).send({
       success: false,

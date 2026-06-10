@@ -1,4 +1,50 @@
+const getChannelsSchema = {
+  response: {
+    200: {
+      type: "object",
+      properties: {
+        success: { type: "boolean" },
+        message: { type: "string" },
+        data: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "integer" },
+              name: { type: "string" },
+              type: { type: "string" },
+              platform: { type: "string" },
+              status: { type: "string" },
+              site_id: { type: "integer" },
+              url: { type: "string" },
+            },
+          },
+        },
+        default: {
+          anyOf: [
+            { type: "null" },
+            {
+              type: "object",
+              properties: {
+                channel_id: { type: "integer" },
+                site_id: { type: "integer" },
+                platform: { type: "string" },
+              },
+            },
+          ],
+        },
+      },
+    },
+  },
+};
+
 const getStoreOptimizationSettingsSchema = {
+  querystring: {
+    type: "object",
+    properties: {
+      channel_id: { type: ["integer", "string"] },
+    },
+  },
   response: {
     200: {
       type: "object",
@@ -16,11 +62,10 @@ const getStoreOptimizationSettingsSchema = {
 const upsertStoreOptimizationSettingsSchema = {
   body: {
     type: "object",
-    additionalProperties: false,
+    additionalProperties: true,
     properties: {
       channel_id: {
-        type: "integer",
-        minimum: 1,
+        type: ["integer", "string"],
       },
       optimize_image_enabled: { type: "boolean" },
       is_filename_template_enabled: { type: "boolean" },
@@ -42,9 +87,11 @@ const upsertStoreOptimizationSettingsSchema = {
       },
       output_format: {
         type: "string",
-        enum: ["jpeg", "png", "webp", "avif", 'original'],
+        enum: ["jpeg", "png", "webp", "avif", "original"],
       },
       auto_optimize_new_images: { type: "boolean" },
+      shop: { type: "string" },
+      store_id: { type: "string" },
     },
   },
   response: {
@@ -60,6 +107,7 @@ const upsertStoreOptimizationSettingsSchema = {
 };
 
 module.exports = {
+  getChannelsSchema,
   getStoreOptimizationSettingsSchema,
   upsertStoreOptimizationSettingsSchema,
 };

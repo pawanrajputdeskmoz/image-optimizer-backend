@@ -546,7 +546,9 @@ async function restoreSingleImage({
       restored_image_url: restoredBcUrl,
       backup_retention_days: RESTORE_BACKUP_DAYS,
       old_alt_text: oldAltText,
+      old_file_name: oldImageName,
       old_image_name: oldImageName,
+      old_image_size: size,
       size,
     },
   };

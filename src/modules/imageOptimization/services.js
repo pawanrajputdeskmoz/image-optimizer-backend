@@ -40,7 +40,7 @@ const bcJsonHeaders = (accessToken) => ({
 /**
  * First DB read in single-image optimize — store feature flags + templates.
  */
-exports.fetchStoreOptimizationSettings = async (storeHash) => {
+exports.fetchStoreOptimizationSettings = async (storeHash, channelId = 1) => {
   try {
 
     if (!storeHash) {
@@ -50,8 +50,14 @@ exports.fetchStoreOptimizationSettings = async (storeHash) => {
       };
     }
 
+    const resolvedChannelId =
+      Number.isFinite(Number(channelId)) && Number(channelId) > 0
+        ? Number(channelId)
+        : 1;
+
     const doc = await StoreOptimizationSettings.findOne({
       store_hash: storeHash,
+      channel_id: resolvedChannelId,
     })
       .select({
         optimize_image_enabled: 1,

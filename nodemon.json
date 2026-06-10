@@ -1,0 +1,8 @@
+{
+  "watch": ["src"],
+  "ignore": ["src/workers/**", "storage/**", "node_modules/**"],
+  "ext": "js,json",
+  "delay": 2500,
+  "signal": "SIGTERM",
+  "legacyWatch": true
+}

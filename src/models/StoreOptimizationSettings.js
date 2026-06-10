@@ -14,7 +14,6 @@ const StoreOptimizationSettingsSchema = new mongoose.Schema(
     store_hash: {
       type: String,
       required: true,
-      unique: true,
       trim: true,
     },
 
@@ -130,10 +129,10 @@ const StoreOptimizationSettingsSchema = new mongoose.Schema(
 // Indexes
 //=======================================================
 
-StoreOptimizationSettingsSchema.index({
-  store_hash: 1,
-  channel_id: 1,
-});
+StoreOptimizationSettingsSchema.index(
+  { store_hash: 1, channel_id: 1 },
+  { unique: true }
+);
 
 module.exports = mongoose.model(
   "StoreOptimizationSettings",

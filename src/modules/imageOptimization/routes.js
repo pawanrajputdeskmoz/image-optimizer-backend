@@ -12,6 +12,7 @@ const {
   getRestoreJob,
 } = require("./controller");
 const {
+  fetchAllProductsSchema,
   singleImageOptimizationSchema,
   bulkImageOptimizationSchema,
   bulkImageOptimizationAllSchema,
@@ -26,6 +27,7 @@ const { authStore } = require("../../middlewares/auth");
 async function imageOptimizationRoutes(app) {
   app.post("/get-all-products", {
     preHandler: authStore,
+    schema: fetchAllProductsSchema,
   }, fetchAllProducts);
 
   app.post(
