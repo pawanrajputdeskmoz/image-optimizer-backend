@@ -6,7 +6,7 @@ const { Worker } = require("bullmq");
 const { createRedisConnection } = require("../db/redis");
 const { connectMongo } = require("../db/mongo");
 const { QUEUE_NAME } = require("../queue/imageRestoreQueue");
-const { restoreSingleImage } = require("../utils/restoreImage");
+const { restoreSingleImage } = require("../modules/imageOptimization/utils/restoreImage");
 const {
   setRestoreJobItemStatus,
   recordRestoreJobImageResult,

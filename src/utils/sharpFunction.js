@@ -71,7 +71,10 @@ exports.getImageSizesFromUrls = async (items, options = {}) => {
         continue;
       }
 
-      const result = await exports.getImageSizeFromUrl(url, options);
+      const fetchSize = options.useRetry
+        ? exports.getImageSizeFromUrlWithRetry
+        : exports.getImageSizeFromUrl;
+      const result = await fetchSize(url, options);
       sizeByImageId[imageId] = {
         bytes: result.bytes ?? null,
         width: result.width ?? null,

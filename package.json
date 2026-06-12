@@ -8,7 +8,8 @@
     "start": "node src/server.js",
     "dev": "nodemon --config nodemon.json src/server.js",
     "worker:image-optimization": "node src/workers/imageOptimizationWorker.js",
-    "worker:image-restore": "node src/workers/imageRestoreWorker.js"
+    "worker:image-restore": "node src/workers/imageRestoreWorker.js",
+    "worker:category-image": "node src/workers/categoryImageWorker.js"
   },
   "keywords": [],
   "author": "",

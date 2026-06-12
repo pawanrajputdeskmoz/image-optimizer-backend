@@ -5,6 +5,7 @@
  * - IMAGE_JOB_STATUSES: whole run (ImageJob / ImageOptimizationJob collection)
  * - IMAGE_JOB_ITEM_STATUSES: per image inside one run (ImageJobItem)
  * - IMAGE_STATUS_VALUES: long-lived per-store image state (ImageStatus)
+ * - StoreImageStat: store-wide optimization totals (products, etc.)
  */
 
 const JOB_TYPES = [
@@ -26,6 +27,7 @@ const IMAGE_JOB_ITEM_STATUSES = [
   "queued",
   "optimizing",
   "optimized",
+  "metadata_updated",
   "restoring",
   "restored",
   "failed",
@@ -33,6 +35,7 @@ const IMAGE_JOB_ITEM_STATUSES = [
 ];
 
 const IMAGE_STATUS_VALUES = ["pending", "optimizing", "optimized", "failed"];
+
 const IMAGE_UPDATE_STATUS_VALUES = [
   "pending",
   "processing",
@@ -45,8 +48,10 @@ const LOG_TYPES = ["info", "warning", "error"];
 const LOG_STEPS = [
   "queue",
   "skip",
+  "skip_upload",
   "download",
   "upload",
+  "verify",
   "optimize",
   "optimize_failed",
   "restore",
@@ -77,6 +82,38 @@ function normalizeJobType(jobType) {
   return JOB_TYPES_SET.has(value) ? value : null;
 }
 
+const HOME_BANNER_SOURCE_TYPES = [
+  "widget",
+  "marketing_banner",
+  "content_page",
+  "storefront_html",
+];
+
+const HOME_BANNER_OPTIMIZATION_STATUSES = [
+  "pending",
+  "optimizing",
+  "optimized",
+  "failed",
+  "skipped",
+];
+
+const CATEGORY_IMAGE_STATUS_VALUES = [
+  "pending",
+  "optimizing",
+  "optimized",
+  "failed",
+  "processing",
+  "uploaded",
+  "skipped",
+];
+
+const CATEGORY_IMAGE_UPDATE_STATUS_VALUES = [
+  "pending",
+  "processing",
+  "complete",
+  "failed",
+];
+
 module.exports = {
   JOB_TYPES,
   JOB_TYPES_SET,
@@ -90,4 +127,8 @@ module.exports = {
   IMAGE_UPDATE_STATUS_VALUES,
   LOG_TYPES,
   LOG_STEPS,
+  HOME_BANNER_SOURCE_TYPES,
+  HOME_BANNER_OPTIMIZATION_STATUSES,
+  CATEGORY_IMAGE_STATUS_VALUES,
+  CATEGORY_IMAGE_UPDATE_STATUS_VALUES,
 };

@@ -14,6 +14,16 @@ const StoreImageStatSchema = new mongoose.Schema(
       default: 0,
     },
 
+    filename_updated_images: {
+      type: Number,
+      default: 0,
+    },
+
+    alt_text_updated_images: {
+      type: Number,
+      default: 0,
+    },
+
     failed_images: {
       type: Number,
       default: 0,

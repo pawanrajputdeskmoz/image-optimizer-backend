@@ -1,25 +1,26 @@
 const path = require("node:path");
 const fs = require("node:fs/promises");
-const config = require("../config");
-const { del } = require("./axiosUtils");
-const { deleteFile } = require("./deleteFile");
-const { downloadImage } = require("./downloadImage");
+const config = require("../../../config");
+const { del } = require("../../../utils/axiosUtils");
+const { deleteFile } = require("../../../utils/deleteFile");
+const { downloadImage } = require("../../../utils/downloadImage");
 const {
   optimizeImage,
   getImageSizeFromUrl,
   getImageSizeFromUrlWithRetry,
   resolveOptimizeFormat,
-} = require("./sharpFunction");
+} = require("../../../utils/sharpFunction");
 const { resolveProductImageUrl } = require("./urls");
 const {
   ImageOptimization,
   ImageOldData,
   ImageStatus,
   StoreImageStat,
-} = require("../models");
+} = require("../../../models");
 const {
   updateBigCommerceProductImageMetadata,
-} = require("../modules/imageOptimization/services");
+  incrementMetadataUpdateStats,
+} = require("../services");
 const { appendImageLog, resolveJobUuid } = require("./imageActivityLog");
 const { replaceProductImage } = require("./bigCommerceProductImage");
 
@@ -133,6 +134,93 @@ exports.compressImage = async ({
       }
     );
 
+    if (!runOptimize) {
+      const metadataPayload = {};
+      if (sortOrder != null) metadataPayload.sortOrder = sortOrder;
+      if (isThumbnail != null) metadataPayload.isThumbnail = isThumbnail;
+      if (runFilename && newImageName) metadataPayload.imageFile = newImageName;
+      if (runAltText && newAltText) metadataPayload.description = newAltText;
+
+      if (Object.keys(metadataPayload).length > 0) {
+        await updateBigCommerceProductImageMetadata({
+          storeHash,
+          productId,
+          imageId,
+          accessToken,
+          ...metadataPayload,
+        });
+      }
+
+      await ImageOldData.updateOne(
+        { store_hash: storeHash, product_id: productId, image_id: imageId },
+        {
+          $set: {
+            imageName: oldImageName,
+            altText: oldAltText,
+            ...(runFilename && newImageName ? { newImageName } : {}),
+            ...(runAltText && newAltText ? { newAltText } : {}),
+          },
+        },
+        { upsert: true }
+      );
+
+      const filenameUpdated = Boolean(runFilename && newImageName);
+      const altTextUpdated = Boolean(runAltText && newAltText);
+      const { error: metadataStatError } = await incrementMetadataUpdateStats({
+        storeHash,
+        filenameUpdated,
+        altTextUpdated,
+      });
+      if (metadataStatError) {
+        await logCompressActivity(
+          effectiveLogContext,
+          { storeHash, productId, imageId },
+          {
+            logType: "warning",
+            step: "stat_update",
+            message: "StoreImageStat metadata update failed",
+            meta: { error: metadataStatError },
+          }
+        );
+      }
+
+      const existingStatus = await ImageStatus.findOne({
+        store_hash: storeHash,
+        product_id: productId,
+        image_id: imageId,
+      })
+        .select({ status: 1 })
+        .lean();
+
+      try {
+        await deleteFile(filePath);
+      } catch {
+        // ignore cleanup errors
+      }
+      filePath = null;
+
+      return {
+        success: true,
+        data: {
+          old_image_id: imageId,
+          new_image_id: imageId,
+          new_image_url: imageUrl,
+          optimizedImage: {
+            compression: { savedBytes: 0, savedPercent: 0 },
+            metadataOnly: true,
+          },
+          metadataOnly: true,
+          status: existingStatus?.status || "pending",
+          imageMeta: {
+            oldImageName,
+            oldAltText,
+            newImageName: runFilename ? newImageName : null,
+            newAltText: runAltText ? newAltText : null,
+          },
+        },
+      };
+    }
+
     const imageQuality = Math.min(
       100,
       Math.max(1, Math.round(Number(settings.image_quality) || 80))
@@ -179,80 +267,6 @@ exports.compressImage = async ({
         { upsert: true }
       ),
     ]);
-
-    if (!runOptimize) {
-      const metadataPayload = {};
-      if (sortOrder != null) metadataPayload.sortOrder = sortOrder;
-      if (isThumbnail != null) metadataPayload.isThumbnail = isThumbnail;
-      if (runFilename && newImageName) metadataPayload.imageFile = newImageName;
-      if (runAltText && newAltText) metadataPayload.description = newAltText;
-
-      if (Object.keys(metadataPayload).length > 0) {
-        await updateBigCommerceProductImageMetadata({
-          storeHash,
-          productId,
-          imageId,
-          accessToken,
-          ...metadataPayload,
-        });
-      }
-
-      await ImageStatus.updateOne(
-        { store_hash: storeHash, product_id: productId, image_id: imageId },
-        {
-          $set: {
-            status: "optimized",
-            image_update_status: "complete",
-            optimized_at: new Date(),
-          },
-        },
-        { upsert: true }
-      );
-
-      try {
-        await StoreImageStat.findOneAndUpdate(
-          { store_hash: storeHash },
-          {
-            $inc: { optimized_images: 1 },
-            $set: { last_optimized_at: new Date() },
-            $setOnInsert: { store_hash: storeHash },
-          },
-          { upsert: true, new: true }
-        );
-      } catch (statErr) {
-        console.error("[compressImage] StoreImageStat error:", statErr);
-        await logCompressActivity(
-          effectiveLogContext,
-          { storeHash, productId, imageId },
-          {
-            logType: "warning",
-            step: "stat_update",
-            message: "StoreImageStat update failed (metadata-only path)",
-            meta: { error: statErr?.message || String(statErr) },
-          }
-        );
-      }
-
-      return {
-        success: true,
-        data: {
-          old_image_id: imageId,
-          new_image_id: imageId,
-          new_image_url: imageUrl,
-          optimizedImage: {
-            compression: { savedBytes: 0, savedPercent: 0 },
-            metadataOnly: true,
-          },
-          status: "optimized",
-          imageMeta: {
-            oldImageName,
-            oldAltText,
-            newImageName: runFilename ? newImageName : null,
-            newAltText: runAltText ? newAltText : null,
-          },
-        },
-      };
-    }
 
     const { error: optimizeError, optimizedImage } = await optimizeImage(
       filePath,
@@ -518,6 +532,28 @@ exports.compressImage = async ({
           meta: { error: statErr?.message || String(statErr) },
         }
       );
+    }
+
+    const filenameUpdated = Boolean(runFilename && newImageName);
+    const altTextUpdated = Boolean(runAltText && newAltText);
+    if (filenameUpdated || altTextUpdated) {
+      const { error: metadataStatError } = await incrementMetadataUpdateStats({
+        storeHash,
+        filenameUpdated,
+        altTextUpdated,
+      });
+      if (metadataStatError) {
+        await logCompressActivity(
+          effectiveLogContext,
+          { storeHash, productId, imageId },
+          {
+            logType: "warning",
+            step: "stat_update",
+            message: "StoreImageStat metadata update failed after optimization",
+            meta: { error: metadataStatError },
+          }
+        );
+      }
     }
 
     return {

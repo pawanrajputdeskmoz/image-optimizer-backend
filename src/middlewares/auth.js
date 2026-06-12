@@ -44,7 +44,8 @@ async function authStore(req, reply) {
     }
 
     req.storeHash = storeHash;
-    req.accessToken = accessToken;
+    // Prefer DB token — JWT may embed a stale token from an older session.
+    req.accessToken = user.access_token || accessToken;
     req.currentUser = user;
     req.channelId = parseChannelId({
       channel_id: req.query?.channel_id ?? req.body?.channel_id,

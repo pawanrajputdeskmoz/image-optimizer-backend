@@ -32,7 +32,7 @@ exports.resolveProductImageUrl = (storeUrl, value, fallbackUrl = null) => {
   const str = String(value).trim();
   if (/^https?:\/\//i.test(str)) {
     return str;
-  } 
+  }
 
   return exports.buildProductImageUrl(storeUrl, str) || fallbackUrl;
 };

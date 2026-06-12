@@ -1,7 +1,11 @@
 const { get } = require("./axiosUtils");
 const config = require("../config");
 
-function parseChannelId(source = {}) {
+function parseChannelId(source) {
+  if (source == null || typeof source !== "object") {
+    return null;
+  }
+
   const raw = source.channel_id ?? source.channelId;
   const channelId = Number(raw);
   return Number.isFinite(channelId) && channelId > 0 ? channelId : null;

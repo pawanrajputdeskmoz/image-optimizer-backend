@@ -66,6 +66,10 @@ module.exports = {
       2
     ),
     restoreConcurrency: envInt("IMAGE_RESTORE_WORKER_CONCURRENCY", 2),
+    categoryOptimizationConcurrency: envInt(
+      "CATEGORY_IMAGE_OPTIMIZATION_WORKER_CONCURRENCY",
+      2
+    ),
   },
 
   pagination: {

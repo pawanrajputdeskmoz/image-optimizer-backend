@@ -12,6 +12,8 @@ exports.downloadImage = async ({
  storeHash,
  productId,
  imageId,
+ sourceType = "product",
+ categoryId = null,
 }) => {
  try {
  const now = new Date();
@@ -28,8 +30,14 @@ exports.downloadImage = async ({
    storeHash
  );
 
- const originalImagesDir = path.join(baseDir, "original");
- const optimizedImagesDir = path.join(baseDir, "optimized");
+ const isCategory = sourceType === "category";
+ const storageSegment = isCategory ? "category" : null;
+ const storageRoot = storageSegment
+   ? path.join(baseDir, storageSegment)
+   : baseDir;
+
+ const originalImagesDir = path.join(storageRoot, "original");
+ const optimizedImagesDir = path.join(storageRoot, "optimized");
 
  fs.mkdirSync(originalImagesDir, { recursive: true });
  fs.mkdirSync(optimizedImagesDir, { recursive: true });

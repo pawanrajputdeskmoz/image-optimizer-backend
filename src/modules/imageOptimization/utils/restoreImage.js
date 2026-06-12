@@ -6,17 +6,17 @@ const {
   ImageOldData,
   ImageJobItem,
   StoreImageStat,
-} = require("../models");
-const { deleteFile } = require("./deleteFile");
+} = require("../../../models");
+const { deleteFile } = require("../../../utils/deleteFile");
 const { resolveProductImageUrl } = require("./urls");
 const {
   uploadProductImage,
   deleteProductImage,
   updateProductImageMetadata,
 } = require("./bigCommerceProductImage");
-const { get } = require("./axiosUtils");
+const { get } = require("../../../utils/axiosUtils");
 const { appendImageLog, resolveJobUuid } = require("./imageActivityLog");
-const config = require("../config");
+const config = require("../../../config");
 
 async function logRestoreActivity(
   logContext,
@@ -171,9 +171,6 @@ async function validateRestoreEligibility({
 }
 
 function resolveRestoreUploadMeta({ overrides = {}, imageOldData, originalPath }) {
-  // Prefer backup metadata saved at optimization time. Bulk/checkbox payloads often
-  // include the current (post-optimize) alt text from the catalog UI, which must not
-  // override the original.
   const description =
     (imageOldData?.altText && String(imageOldData.altText).trim()) ||
     (overrides.altText && String(overrides.altText).trim()) ||
@@ -247,7 +244,6 @@ async function restoreSingleImage({
   let sortOrder = placement.sortOrder;
   let isThumbnail = placement.isThumbnail;
 
-  // If client did not pass placement fields, preserve existing BC image placement.
   if (sortOrder == null || isThumbnail == null) {
     try {
       const imageRes = await get(

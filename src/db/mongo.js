@@ -21,6 +21,11 @@ async function connectMongo() {
 
     isConnected = true;
 
+    const { HomeBannerImage } = require("../models");
+    if (HomeBannerImage?.syncModelIndexes) {
+      await HomeBannerImage.syncModelIndexes();
+    }
+
     console.log("✅ MongoDB connected via Mongoose");
 
     return mongoose.connection;

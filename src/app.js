@@ -15,6 +15,8 @@ if (envPath) {
 
 const {
   imageOptimizationRoutes,
+  homeImagesRoutes,
+  categoryImagesRoutes,
   installationRoutes,
   settingRoutes,
 } = require("./modules");
@@ -33,6 +35,8 @@ async function buildApp() {
   registerStorageFiles(app);
 
   await app.register(imageOptimizationRoutes, { prefix: "/api/image-optimizer" });
+  await app.register(homeImagesRoutes, { prefix: "/api/image-optimizer" });
+  await app.register(categoryImagesRoutes, { prefix: "/api/category-images" });
   await app.register(settingRoutes, { prefix: "/api/settings" });
   await app.register(installationRoutes, { prefix: "/store" });
 

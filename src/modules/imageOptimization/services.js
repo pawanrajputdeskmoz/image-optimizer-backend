@@ -15,15 +15,16 @@ const {
 const {
   validateRestoreEligibility,
   RESTORE_BACKUP_MS,
-} = require("../../utils/restoreImage");
+} = require("./utils/restoreImage");
 const ImageOldData = require("../../models/ImageOldData");
+const StoreImageStat = require("../../models/StoreImageStat");
 const { get } = require("../../utils/axiosUtils");
 const { resolveOptimizeFormat } = require("../../utils/sharpFunction");
 const {
   updateProductImageMetadata,
-} = require("../../utils/bigCommerceProductImage");
-const { resolveProductImageUrl } = require("../../utils/urls");
-const { appendImageLog } = require("../../utils/imageActivityLog");
+} = require("./utils/bigCommerceProductImage");
+const { resolveProductImageUrl } = require("./utils/urls");
+const { appendImageLog } = require("./utils/imageActivityLog");
 const config = require("../../config");
 const { storeDefaults: DEFAULT_STORE_SETTINGS } = config;
 
@@ -748,13 +749,19 @@ exports.resolveImagePlacementFields = (source = {}) => {
 exports.updateBigCommerceProductImageMetadata = updateProductImageMetadata;
 
 exports.buildBigCommerceError = (error) => {
-  const status = error?.response?.status || 500;
+  const status = error?.response?.status || error?.statusCode || 500;
   const bcPayload = error?.response?.data;
-  const message =
+  let message =
     bcPayload?.title ||
     bcPayload?.message ||
     error?.message ||
     "Failed to fetch products from BigCommerce";
+
+  if (status === 401) {
+    message =
+      "BigCommerce rejected the store access token. Reload the app to refresh your API token, " +
+      "or reinstall the app if the token was revoked.";
+  }
 
   return {
     status,
@@ -788,6 +795,98 @@ exports.hasAnyOptimizationFeatureEnabled = (settings) =>
     settings?.is_filename_template_enabled ||
     settings?.is_alt_text_template_enabled
   );
+
+exports.incrementStoreOptimizationStats = async ({
+  storeHash,
+  originalSize = 0,
+  optimizedSize = 0,
+  savedBytes = null,
+  failed = false,
+}) => {
+  if (!storeHash) {
+    return { error: "storeHash is required" };
+  }
+
+  try {
+    if (failed) {
+      await StoreImageStat.findOneAndUpdate(
+        { store_hash: storeHash },
+        {
+          $inc: { failed_images: 1 },
+          $setOnInsert: { store_hash: storeHash },
+        },
+        { upsert: true }
+      );
+      return { error: null };
+    }
+
+    const origSize = Number(originalSize) || 0;
+    const optSize = Number(optimizedSize) || 0;
+    const saved =
+      savedBytes != null
+        ? Number(savedBytes) || 0
+        : Math.max(0, origSize - optSize);
+
+    const statDoc = await StoreImageStat.findOneAndUpdate(
+      { store_hash: storeHash },
+      {
+        $inc: {
+          optimized_images: 1,
+          total_original_size: origSize,
+          total_optimized_size: optSize,
+          total_saved_bytes: saved,
+        },
+        $set: { last_optimized_at: new Date() },
+        $setOnInsert: { store_hash: storeHash },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    const totalOrig = Number(statDoc?.total_original_size) || 0;
+    const totalSaved = Number(statDoc?.total_saved_bytes) || 0;
+    if (totalOrig > 0) {
+      await StoreImageStat.updateOne(
+        { store_hash: storeHash },
+        { $set: { average_saving_percent: (totalSaved / totalOrig) * 100 } }
+      );
+    }
+
+    return { error: null };
+  } catch (err) {
+    console.error("[incrementStoreOptimizationStats]", err.message);
+    return { error: err.message };
+  }
+};
+
+exports.incrementMetadataUpdateStats = async ({
+  storeHash,
+  filenameUpdated = false,
+  altTextUpdated = false,
+}) => {
+  if (!storeHash || (!filenameUpdated && !altTextUpdated)) {
+    return { error: null };
+  }
+
+  const $inc = {};
+  if (filenameUpdated) {
+    $inc.filename_updated_images = 1;
+  }
+  if (altTextUpdated) {
+    $inc.alt_text_updated_images = 1;
+  }
+
+  try {
+    await StoreImageStat.findOneAndUpdate(
+      { store_hash: storeHash },
+      { $inc, $setOnInsert: { store_hash: storeHash } },
+      { upsert: true }
+    );
+    return { error: null };
+  } catch (err) {
+    console.error("[incrementMetadataUpdateStats]", err.message);
+    return { error: err.message };
+  }
+};
 
 function getQueuedImageCount(job) {
   if (job.queued_images != null && job.queued_images > 0) {
@@ -944,6 +1043,11 @@ exports.setJobItemStatus = async ({
     if (savedPercentage != null) $set.saved_percentage = savedPercentage;
   }
 
+  if (status === "metadata_updated") {
+    $set.completed_at = new Date();
+    $set.error_message = null;
+  }
+
   if (status === "failed") {
     $set.completed_at = new Date();
     $set.error_message = errorMessage || "Image optimization failed";
@@ -1012,18 +1116,28 @@ exports.recordOptimizationJobImageResult = async ({
   jobType: jobTypeHint = null,
   savedBytes = null,
   savedPercentage = null,
+  metadataOnly = false,
 }) => {
   if (!jobUuid) {
     return { error: "jobUuid is required", job: null };
   }
 
   const validJobType = normalizeJobType(jobTypeHint) || "bulk";
-  const itemStatus = skipped ? "skipped" : success ? "optimized" : "failed";
+  const itemStatus = skipped
+    ? "skipped"
+    : success
+      ? metadataOnly
+        ? "metadata_updated"
+        : "optimized"
+      : "failed";
   const itemMessage = skipped
     ? skipReason || "Image skipped"
     : success
       ? null
       : errorMessage || "Image optimization failed";
+  const successLogMessage = metadataOnly
+    ? "Image metadata updated successfully"
+    : "Image optimized successfully";
 
   try {
     const itemUpdate = ImageJobItem.updateOne(
@@ -1085,7 +1199,7 @@ exports.recordOptimizationJobImageResult = async ({
           message: skipped
             ? itemMessage
             : success
-              ? "Image optimized successfully"
+              ? successLogMessage
               : errorMessage || "Image optimization failed",
           meta: {
             ...(skipped || success ? {} : { error: errorMessage }),
@@ -1120,7 +1234,7 @@ exports.recordOptimizationJobImageResult = async ({
         message: skipped
           ? itemMessage
           : success
-            ? "Image optimized successfully"
+            ? successLogMessage
             : errorMessage || "Image optimization failed",
         meta: skipped
           ? {}

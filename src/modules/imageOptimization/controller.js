@@ -10,7 +10,7 @@ const path = require("node:path");
 const { get } = require("../../utils/axiosUtils");
 const { imageOptimizationQueue } = require("../../queue/imageOptimizationQueue");
 const { imageRestoreQueue } = require("../../queue/imageRestoreQueue");
-const { restoreSingleImage } = require("../../utils/restoreImage");
+const { restoreSingleImage } = require("./utils/restoreImage");
 const {
   normalizePagination,
   buildBigCommerceError,
@@ -20,6 +20,7 @@ const {
   resolveGeneratedImageMeta,
   resolveImagePlacementFields,
   updateBigCommerceProductImageMetadata,
+  incrementMetadataUpdateStats,
   createBulkOptimizationJob,
   writeOptimizationLogs,
   getOptimizationJobStatus,
@@ -35,11 +36,9 @@ const {
   getAlreadyOptimizedImageIdSet,
   shouldSkipImageOptimization,
 } = require("./services");
-const {
-  getImageSizesFromUrls,
-  resolveProductImageUrl,
-  compressImage,
-} = require("../../utils");
+const { getImageSizesFromUrls } = require("../../utils/sharpFunction");
+const { resolveProductImageUrl } = require("./utils/urls");
+const { compressImage } = require("./utils/compressImage");
 const {
   parseChannelId,
   normalizeImageFile,
@@ -698,31 +697,34 @@ exports.singleImageOptimization = async (req, reply) => {
         ...metadataPayload,
       });
 
-      await Promise.all([
-        ImageOldData.updateOne(
-          { store_hash: storeHash, product_id: productId, image_id: imageId },
-          {
-            $set: {
-              imageName: oldImageName,
-              altText: oldAltText,
-              ...(runFilename && newImageName ? { newImageName } : {}),
-              ...(runAltText && newAltText ? { newAltText } : {}),
-            },
+      await ImageOldData.updateOne(
+        { store_hash: storeHash, product_id: productId, image_id: imageId },
+        {
+          $set: {
+            imageName: oldImageName,
+            altText: oldAltText,
+            ...(runFilename && newImageName ? { newImageName } : {}),
+            ...(runAltText && newAltText ? { newAltText } : {}),
           },
-          { upsert: true }
-        ),
-        ImageStatus.updateOne(
-          { store_hash: storeHash, product_id: productId, image_id: imageId },
-          {
-            $set: {
-              status: "optimized",
-              image_update_status: "complete",
-              optimized_at: new Date(),
-            },
-          },
-          { upsert: true }
-        ),
-      ]);
+        },
+        { upsert: true }
+      );
+
+      const filenameUpdated = Boolean(runFilename && newImageName);
+      const altTextUpdated = Boolean(runAltText && newAltText);
+      await incrementMetadataUpdateStats({
+        storeHash,
+        filenameUpdated,
+        altTextUpdated,
+      });
+
+      const existingStatus = await ImageStatus.findOne({
+        store_hash: storeHash,
+        product_id: productId,
+        image_id: imageId,
+      })
+        .select({ status: 1 })
+        .lean();
 
       return reply.status(200).send({
         success: true,
@@ -730,7 +732,8 @@ exports.singleImageOptimization = async (req, reply) => {
         data: {
           image_id: imageId,
           product_id: productId,
-          status: "optimized",
+          status: existingStatus?.status || "pending",
+          metadata_only: true,
           settings,
           productContext,
           imageMeta: {
@@ -1133,6 +1136,13 @@ exports.updateAltText = async (req, reply) => {
       },
       { upsert: true }
     ).catch(() => { });
+
+    if (altText != null && String(altText).trim()) {
+      await incrementMetadataUpdateStats({
+        storeHash,
+        altTextUpdated: true,
+      });
+    }
 
     return reply.status(200).send({
       success: true,

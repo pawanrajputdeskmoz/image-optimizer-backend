@@ -1,5 +1,5 @@
-const ImageOptimizationLog = require("../models/ImageOptimizationLog");
-const { normalizeJobType } = require("../models/constants");
+const ImageOptimizationLog = require("../../../models/ImageOptimizationLog");
+const { normalizeJobType } = require("../../../models/constants");
 
 /**
  * Standalone job_uuid when no bulk/single job row exists (e.g. sync API).

@@ -1,4 +1,4 @@
-const { get, put, postFormData, del } = require("./axiosUtils");
+const { get, put, postFormData, del } = require("../../../utils/axiosUtils");
 
 const bcJsonHeaders = (accessToken) => ({
   "X-Auth-Token": accessToken,

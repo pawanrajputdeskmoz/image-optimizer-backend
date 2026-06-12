@@ -6,8 +6,8 @@ const { Worker } = require("bullmq");
 const { createRedisConnection } = require("../db/redis");
 const { connectMongo } = require("../db/mongo");
 const { QUEUE_NAME } = require("../queue/imageOptimizationQueue");
-const { compressImage } = require("../utils/compressImage");
-const { resolveProductImageUrl } = require("../utils/urls");
+const { compressImage } = require("../modules/imageOptimization/utils/compressImage");
+const { resolveProductImageUrl } = require("../modules/imageOptimization/utils/urls");
 const {
   setJobItemStatus,
   recordOptimizationJobImageResult,
@@ -51,7 +51,9 @@ async function startWorker() {
         ? { jobUuid, storeHash, jobType, productId, imageId }
         : null;
 
-      if (jobUuid) {
+      const runOptimize = Boolean(settings?.optimize_image_enabled);
+
+      if (jobUuid && runOptimize) {
         const { error: statusError } = await setJobItemStatus({
           jobUuid,
           productId,
@@ -179,6 +181,9 @@ async function startWorker() {
 
       if (jobUuid && (success || isLastAttempt)) {
         const compression = resultData?.optimizedImage?.compression;
+        const metadataOnly = Boolean(
+          resultData?.metadataOnly || resultData?.optimizedImage?.metadataOnly
+        );
         const { error: recordError } = await recordOptimizationJobImageResult({
           jobUuid,
           storeHash,
@@ -189,6 +194,7 @@ async function startWorker() {
           jobType,
           savedBytes: compression?.savedBytes ?? null,
           savedPercentage: compression?.savedPercent ?? null,
+          metadataOnly,
         });
 
         if (recordError) {
