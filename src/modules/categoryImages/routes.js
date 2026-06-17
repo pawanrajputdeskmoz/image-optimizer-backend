@@ -4,7 +4,10 @@ const {
   optimizeCategory,
   getCategoryPreviewImgData,
   restoreCategory,
+  bulkRestoreCategoriesCheckbox,
+  bulkRestoreCategoriesAll,
   bulkCategoryOptimizationCheckbox,
+  bulkCategoryOptimizationAll,
   getCategoryOptimizationJob,
 } = require("./controller");
 const {
@@ -14,6 +17,9 @@ const {
   getCategoryPreviewImgDataSchema,
   restoreCategorySchema,
   bulkCategoryOptimizeCheckboxSchema,
+  bulkCategoryOptimizeAllSchema,
+  bulkRestoreCategoryCheckboxSchema,
+  bulkRestoreCategoryAllSchema,
   getCategoryJobSchema,
 } = require("./schemas");
 
@@ -43,11 +49,29 @@ async function categoryImagesRoutes(app) {
     schema: restoreCategorySchema,
   }, restoreCategory);
 
+  /** Bulk restore checkbox-selected category images */
+  app.post("/bulk-restore-categories-checkbox", {
+    preHandler: authStore,
+    schema: bulkRestoreCategoryCheckboxSchema,
+  }, bulkRestoreCategoriesCheckbox);
+
+  /** Full-store bulk restore: all restorable optimized category images */
+  app.post("/bulk-restore-categories-all", {
+    preHandler: authStore,
+    schema: bulkRestoreCategoryAllSchema,
+  }, bulkRestoreCategoriesAll);
+
   /** Checkbox-selected category images → queues a `checkBox` job */
   app.post("/bulk-optimize-categories-checkbox", {
     preHandler: authStore,
     schema: bulkCategoryOptimizeCheckboxSchema,
   }, bulkCategoryOptimizationCheckbox);
+
+  /** Full-store bulk: fetch all categories (chunked) → queues a `bulk` job */
+  app.post("/bulk-optimize-categories-all", {
+    preHandler: authStore,
+    schema: bulkCategoryOptimizeAllSchema,
+  }, bulkCategoryOptimizationAll);
 
   /** Poll status of a category optimization job by job_uuid */
   app.get("/category-job/:job_uuid", {

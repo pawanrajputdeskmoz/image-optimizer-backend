@@ -21,7 +21,7 @@ const JOB_TYPES = [
 
 const JOB_TYPES_SET = new Set(JOB_TYPES);
 
-const IMAGE_JOB_STATUSES = ["pending", "processing", "completed", "failed"];
+const IMAGE_JOB_STATUSES = ["pending", "fetching", "processing", "completed", "failed"];
 
 const IMAGE_JOB_ITEM_STATUSES = [
   "queued",

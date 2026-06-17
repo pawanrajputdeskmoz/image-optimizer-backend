@@ -619,6 +619,42 @@ exports.optimizeCategoryImageSingle = async ({
   return result;
 };
 
+/**
+ * Fetch all categories eligible for restore for a given store.
+ * Returns only categories that have an optimized/uploaded status AND
+ * a backup file path recorded in CategoryImage.
+ */
+exports.fetchRestorableCategoriesForStore = async (storeHash) => {
+  const statuses = await CategoryImageStatus.find({
+    store_hash: storeHash,
+    status: { $in: ["optimized", "uploaded"] },
+  })
+    .select({ category_id: 1, tree_id: 1, channel_id: 1 })
+    .lean();
+
+  if (!statuses.length) return [];
+
+  const categoryIds = statuses.map((s) => s.category_id);
+
+  const images = await CategoryImage.find({
+    store_hash: storeHash,
+    category_id: { $in: categoryIds },
+    original_image_path: { $ne: null, $exists: true },
+  })
+    .select({ category_id: 1 })
+    .lean();
+
+  const hasBackup = new Set(images.map((img) => img.category_id));
+
+  return statuses
+    .filter((s) => hasBackup.has(s.category_id))
+    .map((s) => ({
+      category_id: s.category_id,
+      tree_id: s.tree_id ?? null,
+      channel_id: s.channel_id || 1,
+    }));
+};
+
 exports.restoreCategoryImageSingle = async ({
   storeHash,
   accessToken,
@@ -633,6 +669,111 @@ exports.restoreCategoryImageSingle = async ({
     categoryId,
     treeId,
   });
+};
+
+/**
+ * Fetch ALL categories for a channel from BigCommerce in paginated chunks.
+ * Silently skips categories with no image_url and already-optimized categories.
+ * Returns items shaped for queueBulkCategoryJobs.
+ */
+exports.fetchAllCategoryImagesInChunks = async ({
+  storeHash,
+  accessToken,
+  channelId,
+  pageSize = config.catalog.pageSize,
+  skipOptimized = true,
+}) => {
+  const treeIds = await resolveCategoryTreeIds(storeHash, accessToken, channelId);
+
+  if (treeIds.length === 0) {
+    return {
+      error: null,
+      items: [],
+      meta: { total_pages_fetched: 0, total_categories_fetched: 0, no_image_skipped: 0, already_optimized_skipped: 0 },
+    };
+  }
+
+  const limit = Math.min(250, Math.max(1, Number(pageSize) || config.catalog.pageSize));
+  const items = [];
+  let page = 1;
+  let totalPages = 1;
+  let totalCategoriesFetched = 0;
+  let noImageSkipped = 0;
+  let alreadyOptimizedSkipped = 0;
+
+  try {
+    while (page <= totalPages) {
+      const response = await fetchCategoriesFromBigCommerce({
+        storeHash,
+        accessToken,
+        page,
+        limit,
+        treeIds,
+      });
+
+      const categories = Array.isArray(response?.data) ? response.data : [];
+      const pagination = response?.meta?.pagination || {};
+      totalPages = Number(pagination.total_pages) || 1;
+      totalCategoriesFetched += categories.length;
+
+      const pageItems = [];
+
+      for (const category of categories) {
+        if (!hasCategoryImageUrl(category)) {
+          noImageSkipped++;
+          continue;
+        }
+        pageItems.push({
+          category_id: category.category_id,
+          image_url: String(category.image_url).trim(),
+          category_name: category.name || null,
+          tree_id: category.tree_id ?? null,
+          shop: storeHash,
+        });
+      }
+
+      if (skipOptimized && pageItems.length > 0) {
+        const categoryIds = pageItems.map((item) => Number(item.category_id));
+        const statusRows = await CategoryImageStatus.find({
+          store_hash: storeHash,
+          category_id: { $in: categoryIds },
+          status: { $in: ["optimized", "optimizing"] },
+        })
+          .select({ category_id: 1 })
+          .lean();
+
+        const skipIds = new Set(statusRows.map((row) => Number(row.category_id)));
+        for (const item of pageItems) {
+          if (skipIds.has(Number(item.category_id))) {
+            alreadyOptimizedSkipped++;
+            continue;
+          }
+          items.push(item);
+        }
+      } else {
+        items.push(...pageItems);
+      }
+
+      page++;
+    }
+  } catch (err) {
+    return {
+      error: err?.response?.data?.title || err?.message || "Failed to fetch categories from BigCommerce",
+      items: [],
+      meta: null,
+    };
+  }
+
+  return {
+    error: null,
+    items,
+    meta: {
+      total_pages_fetched: totalPages,
+      total_categories_fetched: totalCategoriesFetched,
+      no_image_skipped: noImageSkipped,
+      already_optimized_skipped: alreadyOptimizedSkipped,
+    },
+  };
 };
 
 //=======================================================
@@ -766,12 +907,12 @@ exports.setCategoryJobItemStatus = async ({
 
   const $set = { status };
 
-  if (status === "optimizing") {
+  if (status === "optimizing" || status === "restoring") {
     $set.started_at = new Date();
     $set.error_message = null;
   }
 
-  if (status === "optimized") {
+  if (status === "optimized" || status === "restored") {
     $set.completed_at = new Date();
     $set.error_message = null;
     if (savedBytes != null) $set.saved_bytes = savedBytes;
@@ -812,10 +953,11 @@ exports.recordCategoryJobItemResult = async ({
   errorMessage = null,
   savedBytes = null,
   savedPercentage = null,
+  successStatus = "optimized",
 }) => {
   if (!jobUuid) return { error: "jobUuid is required" };
 
-  const itemStatus = skipped ? "skipped" : success ? "optimized" : "failed";
+  const itemStatus = skipped ? "skipped" : success ? successStatus : "failed";
   const itemMessage = skipped
     ? skipReason || "Category skipped"
     : success

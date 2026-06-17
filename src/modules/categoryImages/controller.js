@@ -15,11 +15,14 @@ const {
   createCategoryBulkJob,
   writeCategorySkipLogs,
   getCategoryJobStatus,
+  fetchAllCategoryImagesInChunks,
+  fetchRestorableCategoriesForStore,
 } = require("./services");
 const {
   fetchStoreOptimizationSettings,
 } = require("../imageOptimization/services");
 const { categoryImageQueue } = require("../../queue/categoryImageQueue");
+const { categoryImageRestoreQueue } = require("../../queue/categoryImageRestoreQueue");
 
 function normalizeCategoryPagination(body = {}) {
   const { page } = normalizePagination(body);
@@ -416,6 +419,83 @@ exports.restoreCategory = async (req, reply) => {
   }
 };
 
+/** Checkbox-selected categories → job_type `restore_checkbox` */
+exports.bulkRestoreCategoriesCheckbox = (req, reply) =>
+  queueBulkCategoryRestoreJobs(req, reply, "restore_checkbox");
+
+/** Full-store restore: all restorable optimized category images → job_type `restore_bulk` */
+exports.bulkRestoreCategoriesAll = async (req, reply) => {
+  try {
+    const storeHash = req.storeHash;
+    const accessToken = req.accessToken || req.currentUser?.access_token;
+
+    if (!accessToken || !String(accessToken).trim()) {
+      return reply.status(401).send({
+        success: false,
+        message: "BigCommerce access token is missing for this store",
+      });
+    }
+
+    const items = await fetchRestorableCategoriesForStore(storeHash);
+
+    req.restoreFetchMeta = { restorable_categories: items.length };
+    return queueBulkCategoryRestoreJobs(req, reply, "restore_bulk", items);
+  } catch (error) {
+    console.error("[bulkRestoreCategoriesAll] Error:", error);
+    return reply.status(500).send({
+      success: false,
+      message: error.message || "Failed to queue bulk category image restore",
+    });
+  }
+};
+
+/** Full-store: fetch all BC category images (chunked) → queue job_type `bulk` */
+exports.bulkCategoryOptimizationAll = async (req, reply) => {
+  try {
+    const storeHash = req.storeHash;
+    const accessToken = req.accessToken || req.currentUser?.access_token;
+    const channelId = parseChannelId(req.body) || 1;
+
+    if (!accessToken || !String(accessToken).trim()) {
+      return reply.status(401).send({
+        success: false,
+        message: "BigCommerce access token is missing for this store",
+      });
+    }
+
+    const { error: settingError, settings } = await fetchStoreOptimizationSettings(storeHash, channelId);
+    if (settingError) {
+      return reply.status(500).send({ success: false, message: settingError });
+    }
+
+    if (settings.optimize_image_enabled === false) {
+      return reply.status(400).send({
+        success: false,
+        message: "Image optimization is disabled in store settings",
+        data: { settings },
+      });
+    }
+
+    const { error: catalogError, items, meta } = await fetchAllCategoryImagesInChunks({
+      storeHash,
+      accessToken,
+      channelId,
+    });
+
+    if (catalogError) {
+      const bcError = buildBigCommerceError(new Error(catalogError));
+      return reply.status(bcError.status).send(bcError.body);
+    }
+
+    req.catalogFetchMeta = meta;
+    return queueBulkCategoryJobs(req, reply, "bulk", items);
+  } catch (error) {
+    console.error("[bulkCategoryOptimizationAll] Error:", error);
+    const bcError = buildBigCommerceError(error);
+    return reply.status(bcError.status).send(bcError.body);
+  }
+};
+
 /** Checkbox-selected categories → job_type `checkBox` */
 exports.bulkCategoryOptimizationCheckbox = (req, reply) =>
   queueBulkCategoryJobs(req, reply, "checkBox");
@@ -467,14 +547,16 @@ exports.getCategoryOptimizationJob = async (req, reply) => {
 // Private helper — mirrors queueBulkImageJobs in imageOptimization/controller.js
 //=======================================================
 
-async function queueBulkCategoryJobs(req, reply, jobType) {
+async function queueBulkCategoryJobs(req, reply, jobType, itemsOverride = null) {
   try {
-    const items = Array.isArray(req.body) ? req.body : req.body?.categories;
+    const items = itemsOverride ?? (Array.isArray(req.body) ? req.body : req.body?.categories);
 
     if (!Array.isArray(items) || items.length === 0) {
       return reply.status(400).send({
         success: false,
-        message: "Request body must include a non-empty `categories` array",
+        message: itemsOverride
+          ? "No category images found in store catalog to queue for optimization"
+          : "Request body must include a non-empty `categories` array",
       });
     }
 
@@ -679,31 +761,226 @@ async function queueBulkCategoryJobs(req, reply, jobType) {
       console.error("[queueBulkCategoryJobs] status fetch:", statusError);
     }
 
+    const responseData = {
+      job_uuid: jobUuid,
+      job_type: jobType,
+      queue: "category-image-optimization",
+      total_categories: items.length,
+      queued_categories: jobs.length,
+      skipped_categories: skipped.length,
+      settings: {
+        optimize_image_enabled: Boolean(settings.optimize_image_enabled),
+        image_quality: settings.image_quality,
+        output_format: settings.output_format,
+      },
+      job: jobRecord,
+      jobs,
+      skipped,
+    };
+
+    if (req.catalogFetchMeta) {
+      responseData.catalog = req.catalogFetchMeta;
+    }
+
     return reply.status(202).send({
       success: true,
       message: "Bulk category optimization queued",
-      data: {
-        job_uuid: jobUuid,
-        job_type: jobType,
-        queue: "category-image-optimization",
-        total_categories: items.length,
-        queued_categories: jobs.length,
-        skipped_categories: skipped.length,
-        settings: {
-          optimize_image_enabled: Boolean(settings.optimize_image_enabled),
-          image_quality: settings.image_quality,
-          output_format: settings.output_format,
-        },
-        job: jobRecord,
-        jobs,
-        skipped,
-      },
+      data: responseData,
     });
   } catch (error) {
     console.error("[queueBulkCategoryJobs] Error:", error);
     return reply.status(500).send({
       success: false,
       message: error.message || "Failed to queue bulk category optimization",
+    });
+  }
+}
+
+//=======================================================
+// Private helper — bulk category image restore queue
+//=======================================================
+
+async function queueBulkCategoryRestoreJobs(req, reply, jobType, itemsOverride = null) {
+  try {
+    const items = itemsOverride ?? (Array.isArray(req.body?.categories) ? req.body.categories : []);
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return reply.status(400).send({
+        success: false,
+        message: itemsOverride
+          ? "No restorable category images found for this store"
+          : "Request body must include a non-empty `categories` array",
+      });
+    }
+
+    const storeHash = req.storeHash;
+    const accessToken = req.accessToken || req.currentUser?.access_token;
+
+    if (!accessToken || !String(accessToken).trim()) {
+      return reply.status(401).send({
+        success: false,
+        message: "BigCommerce access token is missing for this store",
+      });
+    }
+
+    const channelId = parseChannelId(req.body) || 1;
+    const jobUuid = crypto.randomUUID();
+    const skipped = [];
+    const toQueue = [];
+    const jobItems = [];
+
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index] || {};
+      const shop = item.shop != null ? String(item.shop).trim() : "";
+      const categoryId = item.category_id;
+      const rawTreeId = item.tree_id;
+      const treeId =
+        rawTreeId != null && Number.isFinite(Number(rawTreeId)) && Number(rawTreeId) > 0
+          ? Number(rawTreeId)
+          : null;
+      const itemChannelId = item.channel_id ? Number(item.channel_id) : channelId;
+
+      const pushSkipped = (reason) => {
+        skipped.push({ index, reason, category_id: categoryId ?? null });
+        if (categoryId != null && categoryId !== "") {
+          jobItems.push({
+            job_uuid: jobUuid,
+            store_hash: storeHash,
+            job_type: jobType,
+            category_id: Number(categoryId),
+            tree_id: treeId,
+            status: "skipped",
+            skip_reason: reason,
+          });
+        }
+      };
+
+      if (shop && shop !== storeHash) {
+        pushSkipped("shop does not match authenticated store");
+        continue;
+      }
+
+      if (categoryId == null || categoryId === "") {
+        pushSkipped("category_id is required");
+        continue;
+      }
+
+      jobItems.push({
+        job_uuid: jobUuid,
+        store_hash: storeHash,
+        job_type: jobType,
+        category_id: Number(categoryId),
+        tree_id: treeId,
+        status: "queued",
+      });
+
+      toQueue.push({
+        index,
+        categoryId: Number(categoryId),
+        treeId,
+        channelId: itemChannelId,
+      });
+    }
+
+    // ── Persist job + item records ──────────────────────────────────────────
+    const { error: createJobError, doc: jobDoc } = await createCategoryBulkJob({
+      jobUuid,
+      storeHash,
+      jobType,
+      totalImages: items.length,
+      queuedImages: toQueue.length,
+      skippedImages: skipped.length,
+      jobItems,
+    });
+
+    if (createJobError || !jobDoc) {
+      return reply.status(500).send({
+        success: false,
+        message: createJobError || "Failed to create category restore job in database",
+      });
+    }
+
+    // ── Write skip warning logs ─────────────────────────────────────────────
+    if (skipped.length > 0) {
+      const { error: skipLogError } = await writeCategorySkipLogs(
+        skipped.map((s) => ({
+          job_uuid: jobUuid,
+          store_hash: storeHash,
+          channel_id: channelId,
+          tree_id: s.tree_id ?? null,
+          job_type: jobType,
+          category_id: s.category_id,
+          reason: s.reason,
+          index: s.index,
+        }))
+      );
+      if (skipLogError) {
+        console.error("[queueBulkCategoryRestoreJobs] skip logs:", skipLogError);
+      }
+    }
+
+    // ── Push each category into BullMQ ──────────────────────────────────────
+    const queueResults = await Promise.all(
+      toQueue.map((entry) =>
+        categoryImageRestoreQueue.add(
+          "restore-category",
+          {
+            jobUuid,
+            job_type: jobType,
+            storeHash,
+            accessToken,
+            channelId: entry.channelId,
+            treeId: entry.treeId,
+            categoryId: entry.categoryId,
+          },
+          {
+            removeOnComplete: 200,
+            removeOnFail: 500,
+            attempts: 2,
+            backoff: { type: "exponential", delay: 5000 },
+          }
+        )
+      )
+    );
+
+    const jobs = queueResults.map((bullJob, i) => ({
+      index: toQueue[i].index,
+      jobId: bullJob.id,
+      category_id: toQueue[i].categoryId,
+    }));
+
+    // ── Fetch fresh job record for the response ─────────────────────────────
+    const { error: statusError, job: jobRecord } = await getCategoryJobStatus(jobUuid, storeHash);
+    if (statusError) {
+      console.error("[queueBulkCategoryRestoreJobs] status fetch:", statusError);
+    }
+
+    const responseData = {
+      job_uuid: jobUuid,
+      job_type: jobType,
+      queue: "category-image-restore",
+      total_categories: items.length,
+      queued_categories: jobs.length,
+      skipped_categories: skipped.length,
+      job: jobRecord,
+      jobs,
+      skipped,
+    };
+
+    if (req.restoreFetchMeta) {
+      responseData.catalog = req.restoreFetchMeta;
+    }
+
+    return reply.status(202).send({
+      success: true,
+      message: "Bulk category image restore queued",
+      data: responseData,
+    });
+  } catch (error) {
+    console.error("[queueBulkCategoryRestoreJobs] Error:", error);
+    return reply.status(500).send({
+      success: false,
+      message: error.message || "Failed to queue bulk category image restore",
     });
   }
 }

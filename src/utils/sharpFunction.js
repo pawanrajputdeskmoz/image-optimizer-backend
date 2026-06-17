@@ -12,7 +12,7 @@ exports.resolveOptimizeFormat = (outputFormat) => {
 
   if (value === "original") return "original";
   if (value === "jpg") return "jpeg";
-  if (["jpeg", "png", "webp", "avif"].includes(value)) return value;
+  if (["jpeg", "png", "webp"].includes(value)) return value;
   return config.image.outputFormat;
 };
 

@@ -1000,6 +1000,62 @@ exports.createBulkOptimizationJob = async ({
   }
 };
 
+/**
+ * Called by catalogFetchWorker after the BC catalog has been fully fetched and
+ * all images have been pushed to imageOptimizationQueue.
+ * Updates the job record with real totals and transitions status to "processing".
+ */
+exports.updateJobAfterCatalogFetch = async ({
+  jobUuid,
+  storeHash,
+  totalImages,
+  queuedImages,
+  skippedImages,
+  jobItems = [],
+  failed = false,
+  errorMessage = null,
+}) => {
+  try {
+    const $set = {
+      total_images: totalImages,
+      queued_images: queuedImages,
+      skipped_images: skippedImages,
+    };
+
+    if (failed) {
+      $set.status = "failed";
+      $set.completed_at = new Date();
+    } else {
+      $set.status = queuedImages > 0 ? "processing" : "completed";
+      if (queuedImages === 0) {
+        $set.completed_at = new Date();
+      }
+    }
+
+    await ImageJob.updateOne({ job_uuid: jobUuid }, { $set });
+
+    if (jobItems.length > 0) {
+      await ImageJobItem.insertMany(jobItems, { ordered: false }).catch(() => {});
+    }
+
+    await ImageOptimizationLog.create({
+      job_uuid: jobUuid,
+      store_hash: storeHash,
+      job_type: "bulk",
+      log_type: failed ? "error" : "info",
+      step: failed ? "optimize_failed" : "queue",
+      message: failed
+        ? `Catalog fetch failed: ${errorMessage}`
+        : `Catalog fetch complete. Queued ${queuedImages} images (${skippedImages} skipped)`,
+      meta: { total_images: totalImages, queued_images: queuedImages, skipped_images: skippedImages },
+    });
+
+    return { error: null };
+  } catch (err) {
+    return { error: err.message };
+  }
+};
+
 exports.writeOptimizationLogs = async (entries = []) => {
   if (!entries.length) {
     return { error: null };
@@ -1598,14 +1654,14 @@ exports.fetchRestorableImagesForStore = async (storeHash) => {
     return [];
   }
 
-  const keys = statuses.map((s) => ({
-    product_id: s.product_id,
-    image_id: s.image_id,
-  }));
+  // Use $in on the indexed image_id field instead of $or on compound pairs —
+  // avoids a potentially massive $or clause that degrades MongoDB performance.
+  const imageIds = statuses.map((s) => s.image_id);
 
   const optimizations = await ImageOptimization.find({
     store_hash: storeHash,
-    $or: keys,
+    image_id: { $in: imageIds },
+    original_image_path: { $ne: null, $exists: true },
   })
     .select({ product_id: 1, image_id: 1, original_image_path: 1 })
     .lean();

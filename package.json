@@ -9,7 +9,11 @@
     "dev": "nodemon --config nodemon.json src/server.js",
     "worker:image-optimization": "node src/workers/imageOptimizationWorker.js",
     "worker:image-restore": "node src/workers/imageRestoreWorker.js",
-    "worker:category-image": "node src/workers/categoryImageWorker.js"
+    "worker:category-image": "node src/workers/categoryImageWorker.js",
+    "worker:category-image-restore": "node src/workers/categoryImageRestoreWorker.js",
+    "worker:catalog-fetch": "node src/workers/catalogFetchWorker.js",
+    "worker:home-image": "node src/workers/homeImageWorker.js",
+    "worker:brand-image": "node src/workers/brandImageWorker.js"
   },
   "keywords": [],
   "author": "",
@@ -22,6 +26,7 @@
     "@fastify/multipart": "^9.4.0",
     "axios": "^1.13.6",
     "bullmq": "^5.73.0",
+    "cheerio": "^1.2.0",
     "dotenv": "^17.3.1",
     "fastify": "^5.8.4",
     "ioredis": "^5.10.1",

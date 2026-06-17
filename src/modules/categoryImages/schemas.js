@@ -115,6 +115,53 @@ const bulkCategoryOptimizeCheckboxSchema = {
   },
 };
 
+const bulkCategoryOptimizeAllSchema = {
+  body: {
+    type: "object",
+    required: ["channel_id"],
+    additionalProperties: true,
+    properties: {
+      ...commonContextProperties,
+    },
+  },
+};
+
+const bulkRestoreCategoryAllSchema = {
+  body: {
+    type: "object",
+    additionalProperties: true,
+    properties: {
+      ...commonContextProperties,
+    },
+  },
+};
+
+const bulkRestoreCategoryCheckboxSchema = {
+  body: {
+    type: "object",
+    required: ["channel_id", "categories"],
+    additionalProperties: true,
+    properties: {
+      ...commonContextProperties,
+      categories: {
+        type: "array",
+        minItems: 1,
+        items: {
+          type: "object",
+          additionalProperties: true,
+          properties: {
+            ...commonContextProperties,
+            category_id: { type: ["integer", "string"] },
+            tree_id: { type: ["integer", "string"] },
+            image_url: { type: "string" },
+            category_name: { type: "string" },
+          },
+        },
+      },
+    },
+  },
+};
+
 const getCategoryJobSchema = {
   params: {
     type: "object",
@@ -132,5 +179,8 @@ module.exports = {
   getCategoryPreviewImgDataSchema,
   restoreCategorySchema,
   bulkCategoryOptimizeCheckboxSchema,
+  bulkCategoryOptimizeAllSchema,
+  bulkRestoreCategoryCheckboxSchema,
+  bulkRestoreCategoryAllSchema,
   getCategoryJobSchema,
 };

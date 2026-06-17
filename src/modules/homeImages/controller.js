@@ -1,116 +1,89 @@
-const config = require("../../config");
-const { parseChannelId } = require("../../utils/channelContext");
-const {
-  buildBigCommerceError,
-  fetchStoreOptimizationSettings,
-  hasAnyOptimizationFeatureEnabled,
-} = require("../imageOptimization/services");
-const {
-  optimizeHomeBannerImageSingle,
-  fetchHomeImages,
-} = require("./services");
+const { User } = require("../../models");
+const { performance } = require("perf_hooks");
+const { parseChannelId, resolveChannelSiteUrl } = require("../../utils/channelContext");
+const { buildBigCommerceError } = require("../imageOptimization/services");
+const { getHomeImagesService } = require("./services");
 
-exports.getHomeImages = async (req, reply) => {
-  try {
-    const storeHash = req.storeHash;
-    const accessToken = req.currentUser?.access_token || req.accessToken;
-    const channelId = parseChannelId(req.query) || req.channelId || 1;
+exports.getHomeImagesController = async (req, reply) => {
+  const apiStart = performance.now();
 
-    if (!storeHash || !accessToken) {
-      return reply.status(401).send({ success: false, message: "Unauthorized." });
-    }
-
-    const result = await fetchHomeImages(
-      storeHash,
-      accessToken,
-      channelId,
-      req.currentUser?.storeUrl || null
-    );
-
-    return reply.send({
-      success: true,
-      message: "Homepage images fetched from BigCommerce.",
-      count: result.count,
-      sources: result.sources,
-      v3_capabilities: result.v3_capabilities,
-      non_v3_sources: result.non_v3_sources,
-      summary: result.summary,
-      errors: result.errors,
-      data: result.data,
-    });
-  } catch (error) {
-    const bcError = buildBigCommerceError(error);
-    return reply.status(bcError.status).send(bcError.body);
-  }
-};
-
-exports.optimizeHomeBannerImageSingle = async (req, reply) => {
   try {
     const body = req.body || {};
     const storeHash = req.storeHash;
-    const accessToken = req.currentUser?.access_token || req.accessToken;
-    const channelId = parseChannelId(body) || req.channelId || 1;
+    const channelId = parseChannelId(body);
 
-    if (!storeHash || !accessToken) {
-      return reply.status(401).send({ success: false, message: "Unauthorized." });
-    }
-
-    const { error: settingError, settings } = await fetchStoreOptimizationSettings(
-      storeHash,
-      channelId
-    );
-
-    if (settingError) {
-      return reply.status(500).send({ success: false, message: settingError });
-    }
-
-    if (!hasAnyOptimizationFeatureEnabled(settings)) {
+    if (!storeHash) {
       return reply.status(400).send({
         success: false,
-        message: "No image optimization features are enabled in store settings",
-        data: { settings },
+        message: "store_hash is required in body or query",
       });
     }
 
-    const result = await optimizeHomeBannerImageSingle({
+    if (!channelId) {
+      return reply.status(400).send({
+        success: false,
+        message: "channel_id is required and must be a positive number",
+      });
+    }
+
+    const user = await User.findOne(
+      { store_hash: storeHash },
+      { storeUrl: 1, access_token: 1, _id: 0 }
+    ).lean();
+
+    if (!user) {
+      return reply.status(404).send({
+        success: false,
+        message: "Store is not installed",
+      });
+    }
+
+    const accessToken = req.accessToken || req.currentUser?.access_token || null;
+
+    if (typeof accessToken !== "string" || accessToken.trim() === "") {
+      return reply.status(401).send({
+        success: false,
+        message: "Access token missing",
+      });
+    }
+
+    const storeUrl = await resolveChannelSiteUrl(
+      storeHash,
+      channelId,
+      accessToken,
+      user.storeUrl || null
+    );
+
+    if (!storeUrl) {
+      return reply.status(400).send({
+        success: false,
+        message: "storeUrl could not be resolved for this channel",
+      });
+    }
+
+    const bcStart = performance.now();
+    const result = await getHomeImagesService({
       storeHash,
       accessToken,
+      storeUrl,
       channelId,
-      recordId: body.id || body.record_id || null,
-      sourceType: body.source_type || null,
-      sourceKey: body.source_key || null,
-      originalUrl: body.original_url || null,
-      sourceId: body.source_id || null,
-      imagePath: body.image_path || null,
-      widgetUuid: body.widget_uuid || null,
-      isUpdateSupported:
-        typeof body.is_update_supported === "boolean"
-          ? body.is_update_supported
-          : null,
-      metadata: body.metadata || null,
-      quality: Number(settings.image_quality),
-      maxWidth: config.image.optimizeMaxDimension,
-      outputFormat: settings.output_format,
-      force: body.force === true || body.force_reoptimize === true || body.reoptimize === true,
-      optimizeOnly: body.optimize_only === true,
-      storeUrl: req.currentUser?.storeUrl || null,
     });
+    
+    const bcEnd = performance.now();
 
-    if (!result.success) {
-      return reply.status(result.status || 400).send({
-        success: false,
-        message: result.message,
-        data: result.data || null,
-      });
-    }
+    console.log(
+      `[BigCommerce API] home images ${(bcEnd - bcStart).toFixed(2)} ms`
+    );
 
-    return reply.send({
-      success: true,
-      skipped: Boolean(result.skipped),
-      message: result.message,
-      data: result.data,
-    });
+    const apiEnd = performance.now();
+    console.log(
+      `[getHomeImagesController] Total API Time: ${(apiEnd - apiStart).toFixed(2)} ms`
+    );
+
+    return reply.status(200).send(result);
   } catch (error) {
+    console.error("[getHomeImagesController ERROR]", error);
+
     const bcError = buildBigCommerceError(error);
     return reply.status(bcError.status).send(bcError.body);
   }

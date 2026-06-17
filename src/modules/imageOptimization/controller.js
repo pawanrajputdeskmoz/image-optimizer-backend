@@ -10,6 +10,7 @@ const path = require("node:path");
 const { get } = require("../../utils/axiosUtils");
 const { imageOptimizationQueue } = require("../../queue/imageOptimizationQueue");
 const { imageRestoreQueue } = require("../../queue/imageRestoreQueue");
+const { catalogFetchQueue } = require("../../queue/catalogFetchQueue");
 const { restoreSingleImage } = require("./utils/restoreImage");
 const {
   normalizePagination,
@@ -35,6 +36,7 @@ const {
   appendImageLog,
   getAlreadyOptimizedImageIdSet,
   shouldSkipImageOptimization,
+  updateJobAfterCatalogFetch,
 } = require("./services");
 const { getImageSizesFromUrls } = require("../../utils/sharpFunction");
 const { resolveProductImageUrl } = require("./utils/urls");
@@ -46,6 +48,17 @@ const {
 } = require("../../utils/channelContext");
 const { performance } = require("perf_hooks");
 const config = require("../../config");
+
+/** Run an array of async tasks in sequential batches to avoid memory / Redis pressure. */
+async function batchAsync(items, batchSize, asyncFn) {
+  const results = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    const batchResults = await Promise.all(batch.map(asyncFn));
+    results.push(...batchResults);
+  }
+  return results;
+}
 
 
 //=======================================================
@@ -802,7 +815,13 @@ exports.singleImageOptimization = async (req, reply) => {
 exports.bulkImageOptimizationCheckbox = (req, reply) =>
   queueBulkImageJobs(req, reply, "checkBox");
 
-/** Full-store: fetch all BC product images (chunked) → queue job_type `bulk` */
+/**
+ * Full-store bulk optimization.
+ * Immediately creates a job record (status: "fetching") and pushes ONE job
+ * to catalogFetchQueue, then returns 202. The catalogFetchWorker does the
+ * actual BigCommerce catalog pagination and image queuing in the background,
+ * avoiding Cloudflare's 30-second request timeout.
+ */
 exports.bulkImageOptimization = async (req, reply) => {
   try {
     const storeHash = req.storeHash;
@@ -825,8 +844,7 @@ exports.bulkImageOptimization = async (req, reply) => {
 
     const channelId = parseChannelId(req.body) || 1;
 
-    const { error: settingError, settings } =
-      await fetchStoreOptimizationSettings(storeHash, channelId);
+    const { error: settingError, settings } = await fetchStoreOptimizationSettings(storeHash, channelId);
     if (settingError) {
       return reply.status(500).send({ success: false, message: settingError });
     }
@@ -839,20 +857,53 @@ exports.bulkImageOptimization = async (req, reply) => {
       });
     }
 
-    const { error: catalogError, items, meta } =
-      await fetchAllCatalogImagesInChunks({
+    const jobUuid = crypto.randomUUID();
+
+    // Create a placeholder job record immediately — status "fetching"
+    const ImageJob = require("../../models/ImageJob");
+    await ImageJob.create({
+      job_uuid: jobUuid,
+      store_hash: storeHash,
+      job_type: "bulk",
+      total_images: 0,
+      queued_images: 0,
+      skipped_images: 0,
+      processed_images: 0,
+      success_images: 0,
+      failed_images: 0,
+      status: "fetching",
+      started_at: new Date(),
+    });
+
+    // Push ONE catalog-fetch job — worker handles the rest
+    await catalogFetchQueue.add(
+      "fetch-catalog",
+      {
+        jobUuid,
         storeHash,
-        accessToken,
         storeUrl,
-      });
+        accessToken,
+        channelId,
+        settings,
+        currency: req.currentUser?.currency || null,
+        store_name: req.currentUser?.store_name || null,
+      },
+      {
+        removeOnComplete: 50,
+        removeOnFail: 100,
+        attempts: 1,
+      }
+    );
 
-    if (catalogError) {
-      const bcError = buildBigCommerceError(new Error(catalogError));
-      return reply.status(bcError.status).send(bcError.body);
-    }
-
-    req.catalogFetchMeta = meta;
-    return queueBulkImageJobs(req, reply, "bulk", items);
+    return reply.status(202).send({
+      success: true,
+      message: "Bulk optimization started. Catalog is being fetched in the background.",
+      data: {
+        job_uuid: jobUuid,
+        job_type: "bulk",
+        status: "fetching",
+      },
+    });
   } catch (error) {
     console.error("[bulkImageOptimization] Error:", error);
     const bcError = buildBigCommerceError(error);
@@ -1338,21 +1389,19 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
       store_name: req.currentUser?.store_name,
     };
 
-    const toQueueWithMeta = await Promise.all(
-      toQueue.map(async (entry) => {
-        const imageMeta = await buildJobImageMeta({
-          storeHash,
-          productId: entry.productId,
-          imageId: Number(entry.imageId),
-          accessToken,
-          settings,
-          storeOptions: storeTemplateOptions,
-          productContextCache,
-          placementOverrides: entry.placementSource || {},
-        });
-        return { ...entry, imageMeta };
-      })
-    );
+    const toQueueWithMeta = await batchAsync(toQueue, 500, async (entry) => {
+      const imageMeta = await buildJobImageMeta({
+        storeHash,
+        productId: entry.productId,
+        imageId: Number(entry.imageId),
+        accessToken,
+        settings,
+        storeOptions: storeTemplateOptions,
+        productContextCache,
+        placementOverrides: entry.placementSource || {},
+      });
+      return { ...entry, imageMeta };
+    });
 
     const { error: placementSyncError } = await syncQueuedJobItemPlacements(
       jobUuid,
@@ -1363,30 +1412,28 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
       console.error("[queueBulkImageJobs] placement sync:", placementSyncError);
     }
 
-    const queueResults = await Promise.all(
-      toQueueWithMeta.map((entry) =>
-        imageOptimizationQueue.add(
-          "optimize-image",
-          {
-            jobUuid,
-            job_type: jobType,
-            storeHash,
-            storeUrl,
-            accessToken,
-            productId: entry.productId,
-            imageId: entry.imageId,
-            imageUrl: entry.imageUrl,
-            optimization_status: entry.optimization_status,
-            settings,
-            imageMeta: entry.imageMeta,
-          },
-          {
-            removeOnComplete: 200,
-            removeOnFail: 500,
-            attempts: 2,
-            backoff: { type: "exponential", delay: 5000 },
-          }
-        )
+    const queueResults = await batchAsync(toQueueWithMeta, 500, (entry) =>
+      imageOptimizationQueue.add(
+        "optimize-image",
+        {
+          jobUuid,
+          job_type: jobType,
+          storeHash,
+          storeUrl,
+          accessToken,
+          productId: entry.productId,
+          imageId: entry.imageId,
+          imageUrl: entry.imageUrl,
+          optimization_status: entry.optimization_status,
+          settings,
+          imageMeta: entry.imageMeta,
+        },
+        {
+          removeOnComplete: 200,
+          removeOnFail: 500,
+          attempts: 2,
+          backoff: { type: "exponential", delay: 5000 },
+        }
       )
     );
 
@@ -1604,27 +1651,25 @@ async function queueBulkRestoreJobs(req, reply, jobType, itemsOverride = null) {
       });
     }
 
-    const queueResults = await Promise.all(
-      toQueue.map((entry) =>
-        imageRestoreQueue.add(
-          "restore-image",
-          {
-            jobUuid,
-            job_type: jobType,
-            storeHash,
-            storeUrl,
-            accessToken,
-            productId: entry.productId,
-            imageId: entry.imageId,
-            overrides: entry.overrides,
-          },
-          {
-            removeOnComplete: 200,
-            removeOnFail: 500,
-            attempts: 2,
-            backoff: { type: "exponential", delay: 5000 },
-          }
-        )
+    const queueResults = await batchAsync(toQueue, 500, (entry) =>
+      imageRestoreQueue.add(
+        "restore-image",
+        {
+          jobUuid,
+          job_type: jobType,
+          storeHash,
+          storeUrl,
+          accessToken,
+          productId: entry.productId,
+          imageId: entry.imageId,
+          overrides: entry.overrides,
+        },
+        {
+          removeOnComplete: 200,
+          removeOnFail: 500,
+          attempts: 2,
+          backoff: { type: "exponential", delay: 5000 },
+        }
       )
     );
 

@@ -70,6 +70,19 @@ module.exports = {
       "CATEGORY_IMAGE_OPTIMIZATION_WORKER_CONCURRENCY",
       2
     ),
+    categoryRestoreConcurrency: envInt(
+      "CATEGORY_IMAGE_RESTORE_WORKER_CONCURRENCY",
+      2
+    ),
+    catalogFetchConcurrency: envInt("CATALOG_FETCH_WORKER_CONCURRENCY", 1),
+    homeImageOptimizationConcurrency: envInt(
+      "HOME_IMAGE_OPTIMIZATION_WORKER_CONCURRENCY",
+      2
+    ),
+    brandOptimizationConcurrency: envInt(
+      "BRAND_IMAGE_OPTIMIZATION_WORKER_CONCURRENCY",
+      2
+    ),
   },
 
   pagination: {

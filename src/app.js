@@ -17,6 +17,7 @@ const {
   imageOptimizationRoutes,
   homeImagesRoutes,
   categoryImagesRoutes,
+  brandImagesRoutes,
   installationRoutes,
   settingRoutes,
 } = require("./modules");
@@ -35,10 +36,14 @@ async function buildApp() {
   registerStorageFiles(app);
 
   await app.register(imageOptimizationRoutes, { prefix: "/api/image-optimizer" });
-  await app.register(homeImagesRoutes, { prefix: "/api/image-optimizer" });
+  // await app.register(homeImagesRoutes, { prefix: "/api/image-optimizer" });
   await app.register(categoryImagesRoutes, { prefix: "/api/category-images" });
+  await app.register(brandImagesRoutes, { prefix: "/api/brand-images" });
   await app.register(settingRoutes, { prefix: "/api/settings" });
   await app.register(installationRoutes, { prefix: "/store" });
+  await app.register(homeImagesRoutes, {
+    prefix: "/api/home-images",
+  });
 
   return app;
 }

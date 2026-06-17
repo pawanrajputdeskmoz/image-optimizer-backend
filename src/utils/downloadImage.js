@@ -30,8 +30,8 @@ exports.downloadImage = async ({
    storeHash
  );
 
- const isCategory = sourceType === "category";
- const storageSegment = isCategory ? "category" : null;
+ const storageSegment =
+   sourceType && sourceType !== "product" ? sourceType : null;
  const storageRoot = storageSegment
    ? path.join(baseDir, storageSegment)
    : baseDir;
