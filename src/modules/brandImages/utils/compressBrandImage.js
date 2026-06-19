@@ -7,7 +7,7 @@ const {
   buildOptimizationMetadataFromUrls,
 } = require("../../../utils/sharpFunction");
 const { downloadImage } = require("../../../utils/downloadImage");
-const { resolveCategoryOptimizeFormat } = require("../../categoryImages/utils/categoryImageOptimize");
+const { resolveImageTypeOptimizeFormat } = require("../../../utils/sharpFunction");
 const { replaceBrandImage, verifyBrandImageUpdate } = require("./bigCommerceBrandImage");
 const {
   appendBrandImageJobLog,
@@ -136,11 +136,11 @@ exports.compressBrandImage = async ({
       };
     }
 
-    // ── 3. Resolve output format (same rules as category: JPEG/PNG/GIF/ICO) ──
-    const brandFormat = resolveCategoryOptimizeFormat(
+    // ── 3. Resolve output format — brand: jpeg, jpg, png only; else keep original ──
+    const brandFormat = resolveImageTypeOptimizeFormat(
+      "brand",
       settings.output_format,
-      inputFormat,
-      Boolean(meta.hasAlpha)
+      inputFormat
     );
 
     // ── 4. Mark as optimizing in DB ─────────────────────────────────────────
@@ -254,14 +254,19 @@ exports.compressBrandImage = async ({
 
       await logBrandStep(effectiveLogContext, {
         logType: "info",
-        step: "skip_upload",
-        message: "Brand image already at optimal quality, upload skipped",
-        meta: { brand_id: Number(brandId) },
+        step: "complete",
+        message: "Brand image optimized successfully",
+        meta: {
+          brand_id: Number(brandId),
+          saved_bytes: 0,
+          saved_percentage: 0,
+          upload_skipped: true,
+        },
       });
 
       return {
         success: true,
-        message: "Brand image already at optimal quality, marked as optimized",
+        message: "Brand image optimized successfully",
         data: {
           brand_id: Number(brandId),
           brand_name: brandName,
@@ -269,6 +274,7 @@ exports.compressBrandImage = async ({
           new_image_url: imageUrl,
           optimizedImage,
           status: "optimized",
+          upload_skipped: true,
         },
       };
     }

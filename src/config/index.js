@@ -83,6 +83,10 @@ module.exports = {
       "BRAND_IMAGE_OPTIMIZATION_WORKER_CONCURRENCY",
       2
     ),
+    brandRestoreConcurrency: envInt(
+      "BRAND_IMAGE_RESTORE_WORKER_CONCURRENCY",
+      2
+    ),
   },
 
   pagination: {

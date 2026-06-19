@@ -18,31 +18,13 @@ function getFormatFromUrl(url) {
   return "jpeg";
 }
 
+const { resolveImageTypeOptimizeFormat } = require("../../../utils/sharpFunction");
+
 /**
- * Map store output_format to BC-compatible upload format.
- * WebP/AVIF fall back to JPEG (no alpha) or PNG (alpha).
+ * Category images: jpeg, jpg, gif, png allowed; else keep original format.
  */
 function resolveCategoryOptimizeFormat(settingsFormat, originalFormat, hasAlpha) {
-  const configured = String(settingsFormat || "jpeg").trim().toLowerCase();
-  const normalized = configured === "jpg" ? "jpeg" : configured;
-
-  if (["webp", "avif"].includes(normalized)) {
-    return hasAlpha ? "png" : "jpeg";
-  }
-
-  if (normalized === "png") {
-    return hasAlpha ? "png" : "jpeg";
-  }
-
-  if (normalized === "gif") {
-    return originalFormat === "gif" ? "gif" : "jpeg";
-  }
-
-  if (normalized === "ico") {
-    return originalFormat === "ico" ? "ico" : hasAlpha ? "png" : "jpeg";
-  }
-
-  return resolveCategoryOutputFormat(originalFormat, hasAlpha, false);
+  return resolveImageTypeOptimizeFormat("category", settingsFormat, originalFormat);
 }
 
 /**

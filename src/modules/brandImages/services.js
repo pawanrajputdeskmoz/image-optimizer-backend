@@ -1,13 +1,13 @@
 const crypto = require("node:crypto");
 const { get } = require("../../utils/axiosUtils");
-const { BrandImageStatus } = require("../../models");
+const { BrandImage, BrandImageStatus } = require("../../models");
 const BrandJob = require("../../models/BrandJob");
 const BrandJobItem = require("../../models/BrandJobItem");
 const BrandImageJobLog = require("../../models/BrandImageJobLog");
 const { getImageSizesFromUrls } = require("../../utils/sharpFunction");
 const { compressBrandImage } = require("./utils/compressBrandImage");
 const { fetchBrandById } = require("./utils/bigCommerceBrandImage");
-const { restoreSingleBrandImage } = require("./utils/restoreBrandImage");
+const { restoreSingleBrandImage, purgeStaleBrandOptimizationIfBackupMissing } = require("./utils/restoreBrandImage");
 const {
   fetchStoreOptimizationSettings,  
 } = require("../imageOptimization/services");
@@ -70,7 +70,31 @@ exports.fetchBrandImages = async ({
       { brand_id: 1, status: 1, image_update_status: 1, _id: 0 }
     ).lean();
 
+    const staleBrandIds = new Set();
+    const optimizedBrandIds = statusRows
+      .filter((row) => ["optimized", "uploaded"].includes(row.status))
+      .map((row) => row.brand_id);
+
+    if (optimizedBrandIds.length > 0) {
+      await Promise.all(
+        optimizedBrandIds.map(async (brandId) => {
+          const purge = await purgeStaleBrandOptimizationIfBackupMissing({
+            storeHash,
+            brandId,
+          });
+
+          if (purge.cleaned) {
+            staleBrandIds.add(brandId);
+          }
+        })
+      );
+    }
+
     for (const row of statusRows) {
+      if (staleBrandIds.has(row.brand_id)) {
+        continue;
+      }
+
       statusByBrandId[row.brand_id] = {
         optimization_status: row.status,
         image_update_status: row.image_update_status || "pending",
@@ -257,10 +281,149 @@ exports.optimizeBrandImageSingle = async ({
   return result;
 };
 
-exports.restoreBrandImageSingle = async ({ storeHash, accessToken, brandId }) =>
-  restoreSingleBrandImage({ storeHash, accessToken, brandId });
+exports.restoreBrandImageSingle = async ({
+  storeHash,
+  accessToken,
+  brandId,
+  logContext = null,
+}) => restoreSingleBrandImage({ storeHash, accessToken, brandId, logContext });
+
+/**
+ * Fetch all brands eligible for restore for a given store.
+ * Returns only brands with optimized/uploaded status AND a backup file path.
+ */
+exports.fetchRestorableBrandsForStore = async (storeHash) => {
+  const statuses = await BrandImageStatus.find({
+    store_hash: storeHash,
+    status: { $in: ["optimized", "uploaded"] },
+  })
+    .select({ brand_id: 1 })
+    .lean();
+
+  if (!statuses.length) return [];
+
+  const brandIds = statuses.map((s) => s.brand_id);
+
+  const images = await BrandImage.find({
+    store_hash: storeHash,
+    brand_id: { $in: brandIds },
+    original_image_path: { $ne: null, $exists: true },
+  })
+    .select({ brand_id: 1 })
+    .lean();
+
+  const hasBackup = new Set(images.map((img) => img.brand_id));
+
+  return statuses
+    .filter((s) => hasBackup.has(s.brand_id))
+    .map((s) => ({
+      brand_id: s.brand_id,
+    }));
+};
+
+exports.purgeStaleBrandOptimizationIfBackupMissing = purgeStaleBrandOptimizationIfBackupMissing;
 
 exports.fetchStoreOptimizationSettings = fetchStoreOptimizationSettings;
+
+/**
+ * Fetch ALL brands with images from BigCommerce in paginated chunks.
+ * Skips brands without image_url; optionally skips already-optimized brands.
+ * Returns items shaped for queueBulkBrandJobs.
+ */
+exports.fetchAllBrandImagesInChunks = async ({
+  storeHash,
+  accessToken,
+  pageSize = config.catalog.pageSize,
+  skipOptimized = true,
+}) => {
+  const limit = Math.min(250, Math.max(1, Number(pageSize) || config.catalog.pageSize));
+  const items = [];
+  let page = 1;
+  let totalPages = 1;
+  let totalBrandsFetched = 0;
+  let noImageSkipped = 0;
+  let alreadyOptimizedSkipped = 0;
+
+  try {
+    while (page <= totalPages) {
+      const params = new URLSearchParams({
+        page: String(page),
+        limit: String(limit),
+      });
+
+      const response = await get(
+        `https://api.bigcommerce.com/stores/${storeHash}/v3/catalog/brands?${params.toString()}`,
+        bcJsonHeaders(accessToken),
+        { timeout: config.api.bigCommerceTimeoutMs }
+      );
+
+      const brands = Array.isArray(response?.data) ? response.data : [];
+      const pagination = response?.meta?.pagination || {};
+      totalPages = Number(pagination.total_pages) || 1;
+      totalBrandsFetched += brands.length;
+
+      const pageItems = [];
+
+      for (const brand of brands) {
+        if (typeof brand.image_url !== "string" || !brand.image_url.trim()) {
+          noImageSkipped++;
+          continue;
+        }
+
+        pageItems.push({
+          brand_id: brand.id,
+          image_url: String(brand.image_url).trim(),
+          brand_name: brand.name || null,
+          shop: storeHash,
+        });
+      }
+
+      if (skipOptimized && pageItems.length > 0) {
+        const brandIds = pageItems.map((item) => Number(item.brand_id));
+        const statusRows = await BrandImageStatus.find({
+          store_hash: storeHash,
+          brand_id: { $in: brandIds },
+          status: { $in: Array.from(SKIP_BRAND_STATUSES) },
+        })
+          .select({ brand_id: 1 })
+          .lean();
+
+        const skipIds = new Set(statusRows.map((row) => Number(row.brand_id)));
+        for (const item of pageItems) {
+          if (skipIds.has(Number(item.brand_id))) {
+            alreadyOptimizedSkipped++;
+            continue;
+          }
+          items.push(item);
+        }
+      } else {
+        items.push(...pageItems);
+      }
+
+      page++;
+    }
+  } catch (err) {
+    return {
+      error:
+        err?.response?.data?.title ||
+        err?.message ||
+        "Failed to fetch brands from BigCommerce",
+      items: [],
+      meta: null,
+    };
+  }
+
+  return {
+    error: null,
+    items,
+    meta: {
+      total_pages_fetched: totalPages,
+      total_brands_fetched: totalBrandsFetched,
+      no_image_skipped: noImageSkipped,
+      already_optimized_skipped: alreadyOptimizedSkipped,
+    },
+  };
+};
 
 //=======================================================
 // Brand Job Management
@@ -384,12 +547,12 @@ exports.setBrandJobItemStatus = async ({
 
   const $set = { status };
 
-  if (status === "optimizing") {
+  if (status === "optimizing" || status === "restoring") {
     $set.started_at = new Date();
     $set.error_message = null;
   }
 
-  if (status === "optimized") {
+  if (status === "optimized" || status === "restored") {
     $set.completed_at = new Date();
     $set.error_message = null;
     if (savedBytes != null) $set.saved_bytes = savedBytes;
@@ -429,15 +592,19 @@ exports.recordBrandJobItemResult = async ({
   errorMessage = null,
   savedBytes = null,
   savedPercentage = null,
+  successStatus = "optimized",
 }) => {
   if (!jobUuid) return { error: "jobUuid is required" };
 
-  const itemStatus = skipped ? "skipped" : success ? "optimized" : "failed";
+  const itemStatus = skipped ? "skipped" : success ? successStatus : "failed";
   const itemMessage = skipped
     ? skipReason || "Brand skipped"
     : success
       ? null
-      : errorMessage || "Brand image optimization failed";
+      : errorMessage ||
+        (successStatus === "restored"
+          ? "Brand image restore failed"
+          : "Brand image optimization failed");
 
   try {
     const itemUpdate = BrandJobItem.updateOne(
@@ -456,9 +623,12 @@ exports.recordBrandJobItemResult = async ({
     );
 
     const jobIncrement = { processed_images: 1 };
-    if (!skipped) {
-      if (success) jobIncrement.success_images = 1;
-      else jobIncrement.failed_images = 1;
+    if (skipped) {
+      jobIncrement.skipped_images = 1;
+    } else if (success) {
+      jobIncrement.success_images = 1;
+    } else {
+      jobIncrement.failed_images = 1;
     }
 
     const jobUpdate = BrandJob.findOneAndUpdate(

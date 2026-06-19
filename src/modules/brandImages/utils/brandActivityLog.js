@@ -1,6 +1,15 @@
 const BrandImageJobLog = require("../../../models/BrandImageJobLog");
 const { normalizeJobType } = require("../../../models/constants");
 
+const BULK_BRAND_JOB_TYPES = new Set([
+  "checkBox",
+  "bulk",
+  "restore_checkbox",
+  "restore_bulk",
+  "webhook",
+  "reoptimize",
+]);
+
 function standaloneBrandJobUuid(storeHash, brandId = null) {
   const base = `brand:${String(storeHash || "unknown")}`;
   return brandId != null ? `${base}:${Number(brandId)}` : base;
@@ -10,6 +19,12 @@ function resolveBrandJobUuid(logContext = {}, storeHash, brandId = null) {
   if (logContext.jobUuid) {
     return logContext.jobUuid;
   }
+
+  const jobType = normalizeJobType(logContext.jobType) || "single";
+  if (BULK_BRAND_JOB_TYPES.has(jobType)) {
+    return null;
+  }
+
   return standaloneBrandJobUuid(storeHash || logContext.storeHash, brandId);
 }
 
@@ -31,8 +46,22 @@ async function appendBrandImageJobLog({
 
   try {
     const validJobType = normalizeJobType(jobType) || "single";
+    const resolvedJobUuid =
+      jobUuid ||
+      resolveBrandJobUuid({ jobType: validJobType, storeHash }, storeHash, brandId);
+
+    if (!resolvedJobUuid) {
+      console.warn("[appendBrandImageJobLog] missing jobUuid for bulk job", {
+        jobType: validJobType,
+        storeHash,
+        brandId,
+        step,
+      });
+      return { error: null };
+    }
+
     await BrandImageJobLog.create({
-      job_uuid: jobUuid || standaloneBrandJobUuid(storeHash, brandId),
+      job_uuid: resolvedJobUuid,
       store_hash: storeHash,
       source_type: "brand",
       job_type: validJobType,

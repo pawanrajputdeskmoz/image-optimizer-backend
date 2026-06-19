@@ -13,7 +13,9 @@
     "worker:category-image-restore": "node src/workers/categoryImageRestoreWorker.js",
     "worker:catalog-fetch": "node src/workers/catalogFetchWorker.js",
     "worker:home-image": "node src/workers/homeImageWorker.js",
-    "worker:brand-image": "node src/workers/brandImageWorker.js"
+    "worker:brand-image": "node src/workers/brandImageWorker.js",
+    "worker:brand-image-restore": "node src/workers/brandImageRestoreWorker.js",
+    "workers:windows": "start \"image-optimization\" cmd /k npm run worker:image-optimization && start \"image-restore\" cmd /k npm run worker:image-restore && start \"category-image\" cmd /k npm run worker:category-image && start \"category-image-restore\" cmd /k npm run worker:category-image-restore && start \"catalog-fetch\" cmd /k npm run worker:catalog-fetch && start \"home-image\" cmd /k npm run worker:home-image && start \"brand-image\" cmd /k npm run worker:brand-image && start \"brand-image-restore\" cmd /k npm run worker:brand-image-restore"
   },
   "keywords": [],
   "author": "",

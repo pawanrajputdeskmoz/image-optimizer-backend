@@ -1,5 +1,6 @@
 const path = require("node:path");
 const fs = require("node:fs/promises");
+const sharp = require("sharp");
 const config = require("../../../config");
 const { del } = require("../../../utils/axiosUtils");
 const { deleteFile } = require("../../../utils/deleteFile");
@@ -8,7 +9,7 @@ const {
   optimizeImage,
   getImageSizeFromUrl,
   getImageSizeFromUrlWithRetry,
-  resolveOptimizeFormat,
+  resolveImageTypeOptimizeFormat,
 } = require("../../../utils/sharpFunction");
 const { resolveProductImageUrl } = require("./urls");
 const {
@@ -268,11 +269,19 @@ exports.compressImage = async ({
       ),
     ]);
 
+    const meta = await sharp(filePath, { failOn: "none", animated: false }).metadata();
+    const inputFormat = String(meta.format || "jpeg").toLowerCase();
+    const productFormat = resolveImageTypeOptimizeFormat(
+      "product",
+      settings.output_format,
+      inputFormat
+    );
+
     const { error: optimizeError, optimizedImage } = await optimizeImage(
       filePath,
       {
         quality: settings.image_quality,
-        format: resolveOptimizeFormat(settings.output_format),
+        format: productFormat,
         outputPath: optimizedImagesDir,
         outputBaseName: assetId,
       }

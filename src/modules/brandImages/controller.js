@@ -4,12 +4,15 @@ const { performance } = require("perf_hooks");
 const config = require("../../config");
 const {
   fetchBrandImages,
+  fetchAllBrandImagesInChunks,
   optimizeBrandImageSingle,
   restoreBrandImageSingle,
+  fetchRestorableBrandsForStore,
   getAlreadyOptimizedBrandIdSet,
   createBrandBulkJob,
   getBrandJobStatus,
   writeBrandSkipLogs,
+  purgeStaleBrandOptimizationIfBackupMissing,
 } = require("./services");
 const {
   normalizePagination,
@@ -19,6 +22,7 @@ const {
 } = require("../imageOptimization/services");
 const { parseChannelId } = require("../../utils/channelContext");
 const { brandImageQueue } = require("../../queue/brandImageQueue");
+const { brandImageRestoreQueue } = require("../../queue/brandImageRestoreQueue");
 
 exports.fetchAllBrands = async (req, reply) => {
   const apiStart = performance.now();
@@ -110,6 +114,8 @@ exports.getBrandPreviewImgData = async (req, reply) => {
     }
 
     const query = { store_hash: storeHash, brand_id: brandId };
+
+    await purgeStaleBrandOptimizationIfBackupMissing({ storeHash, brandId });
 
     const [brandImage, brandImageStatus] = await Promise.all([
       BrandImage.findOne(query)
@@ -324,30 +330,17 @@ exports.optimizeBrand = async (req, reply) => {
   }
 };
 
-/**
- * POST /bulk-optimize-brands-checkbox
- * Accepts an array of brand objects and enqueues each one for optimization.
- */
-exports.bulkBrandOptimizationCheckbox = async (req, reply) => {
+/** Full-store: fetch all BC brand images (chunked) → queue job_type `bulk` */
+exports.bulkBrandOptimizationAll = async (req, reply) => {
   try {
     const storeHash = req.storeHash;
     const accessToken = req.accessToken || req.currentUser?.access_token;
+    const channelId = parseChannelId(req.body) || 1;
 
     if (!accessToken || !String(accessToken).trim()) {
       return reply.status(401).send({
         success: false,
         message: "BigCommerce access token is missing for this store",
-      });
-    }
-
-    const body = req.body || {};
-    const channelId = parseChannelId(body) || 1;
-    const rawItems = Array.isArray(body.brands) ? body.brands : [];
-
-    if (rawItems.length === 0) {
-      return reply.status(400).send({
-        success: false,
-        message: "brands array is required and must not be empty",
       });
     }
 
@@ -367,171 +360,34 @@ exports.bulkBrandOptimizationCheckbox = async (req, reply) => {
       });
     }
 
-    // Normalize incoming items
-    const validItems = [];
-    const invalidItems = [];
+    const forceReoptimize =
+      req.body?.force === true ||
+      req.body?.force_reoptimize === true ||
+      req.body?.reoptimize === true;
 
-    for (const item of rawItems) {
-      const brandId = Number(item?.brand_id ?? item?.brandId);
-      const imageUrl = String(item?.image_url ?? item?.imageUrl ?? "").trim();
-
-      if (!Number.isFinite(brandId) || brandId <= 0) {
-        invalidItems.push({ raw: item, reason: "brand_id is missing or invalid" });
-        continue;
-      }
-
-      if (!imageUrl) {
-        invalidItems.push({ brand_id: brandId, reason: "image_url is missing" });
-        continue;
-      }
-
-      validItems.push({
-        brand_id: brandId,
-        image_url: imageUrl,
-        brand_name: item?.brand_name ?? item?.name ?? null,
-        optimization_status: item?.optimization_status ?? item?.status ?? null,
-      });
-    }
-
-    if (validItems.length === 0) {
-      return reply.status(400).send({
-        success: false,
-        message: "No valid brand items to queue",
-        data: { invalid_items: invalidItems },
-      });
-    }
-
-    // Skip already-optimized brands
-    const alreadyOptimizedIds = await getAlreadyOptimizedBrandIdSet(
+    const { error: catalogError, items, meta } = await fetchAllBrandImagesInChunks({
       storeHash,
-      validItems
-    );
-
-    const toQueue = [];
-    const skippedItems = [];
-
-    for (const item of validItems) {
-      if (alreadyOptimizedIds.has(item.brand_id)) {
-        skippedItems.push({
-          brand_id: item.brand_id,
-          reason: "Brand image is already optimized",
-        });
-      } else {
-        toQueue.push(item);
-      }
-    }
-
-    const jobUuid = crypto.randomUUID();
-    const totalImages = validItems.length;
-    const queuedImages = toQueue.length;
-    const skippedImages = skippedItems.length;
-
-    // Build job item documents (one per queued brand)
-    const jobItems = toQueue.map((item) => ({
-      job_uuid: jobUuid,
-      store_hash: storeHash,
-      job_type: "checkBox",
-      brand_id: item.brand_id,
-      image_url: item.image_url,
-      status: "queued",
-    }));
-
-    // Persist job record + items
-    const { error: jobError } = await createBrandBulkJob({
-      jobUuid,
-      storeHash,
-      jobType: "checkBox",
-      totalImages,
-      queuedImages,
-      skippedImages,
-      jobItems,
+      accessToken,
+      skipOptimized: !forceReoptimize,
     });
 
-    if (jobError) {
-      return reply.status(500).send({
-        success: false,
-        message: `Failed to create brand optimization job: ${jobError}`,
-      });
+    if (catalogError) {
+      const bcError = buildBigCommerceError(new Error(catalogError));
+      return reply.status(bcError.status).send(bcError.body);
     }
 
-    if (skippedItems.length > 0) {
-      const { error: skipLogError } = await writeBrandSkipLogs(
-        skippedItems.map((s, index) => ({
-          job_uuid: jobUuid,
-          store_hash: storeHash,
-          job_type: "checkBox",
-          brand_id: s.brand_id,
-          reason: s.reason,
-          index,
-        }))
-      );
-      if (skipLogError) {
-        console.error("[bulkBrandOptimizationCheckbox] skip logs:", skipLogError);
-      }
-    }
-
-    if (toQueue.length > 0) {
-      const BrandImageJobLog = require("../../models/BrandImageJobLog");
-      await BrandImageJobLog.insertMany(
-        toQueue.map((item, index) => ({
-          job_uuid: jobUuid,
-          store_hash: storeHash,
-          source_type: "brand",
-          job_type: "checkBox",
-          brand_id: item.brand_id,
-          log_type: "info",
-          step: "queue",
-          message: "Brand image queued for optimization",
-          meta: { index, image_url: item.image_url },
-        })),
-        { ordered: false }
-      );
-    }
-
-    // Enqueue each brand image job
-    const bullJobs = toQueue.map((item) => ({
-      name: "optimize-brand",
-      data: {
-        jobUuid,
-        job_type: "checkBox",
-        storeHash,
-        accessToken,
-        brandId: item.brand_id,
-        imageUrl: item.image_url,
-        brandName: item.brand_name,
-        settings,
-        optimization_status: item.optimization_status,
-      },
-      opts: {
-        removeOnComplete: 50,
-        removeOnFail: 100,
-        attempts: 2,
-        backoff: { type: "exponential", delay: 2000 },
-      },
-    }));
-
-    await brandImageQueue.addBulk(bullJobs);
-
-    return reply.status(202).send({
-      success: true,
-      message: `Brand image optimization started. ${queuedImages} queued, ${skippedImages} skipped.`,
-      data: {
-        job_uuid: jobUuid,
-        job_type: "checkBox",
-        status: "processing",
-        total_images: totalImages,
-        queued_images: queuedImages,
-        skipped_images: skippedImages,
-        skipped_details: skippedItems,
-        invalid_items: invalidItems,
-      },
-    });
+    req.catalogFetchMeta = meta;
+    return queueBulkBrandJobs(req, reply, "bulk", items);
   } catch (error) {
-    console.error("[bulkBrandOptimizationCheckbox] Error:", error);
+    console.error("[bulkBrandOptimizationAll] Error:", error);
     const bcError = buildBigCommerceError(error);
     return reply.status(bcError.status).send(bcError.body);
   }
 };
+
+/** Checkbox-selected brands → job_type `checkBox` */
+exports.bulkBrandOptimizationCheckbox = (req, reply) =>
+  queueBulkBrandJobs(req, reply, "checkBox");
 
 /**
  * GET /brand-job/:job_uuid
@@ -566,3 +422,464 @@ exports.getBrandOptimizationJob = async (req, reply) => {
     });
   }
 };
+
+/** Checkbox-selected brands → job_type `restore_checkbox` */
+exports.bulkRestoreBrandsCheckbox = (req, reply) =>
+  queueBulkBrandRestoreJobs(req, reply, "restore_checkbox");
+
+/** Full-store restore: all restorable optimized brand images → job_type `restore_bulk` */
+exports.bulkRestoreBrandsAll = async (req, reply) => {
+  try {
+    const storeHash = req.storeHash;
+    const accessToken = req.accessToken || req.currentUser?.access_token;
+
+    if (!accessToken || !String(accessToken).trim()) {
+      return reply.status(401).send({
+        success: false,
+        message: "BigCommerce access token is missing for this store",
+      });
+    }
+
+    const items = await fetchRestorableBrandsForStore(storeHash);
+
+    req.restoreFetchMeta = { restorable_brands: items.length };
+    return queueBulkBrandRestoreJobs(req, reply, "restore_bulk", items);
+  } catch (error) {
+    console.error("[bulkRestoreBrandsAll] Error:", error);
+    return reply.status(500).send({
+      success: false,
+      message: error.message || "Failed to queue bulk brand image restore",
+    });
+  }
+};
+
+async function queueBulkBrandJobs(req, reply, jobType, itemsOverride = null) {
+  try {
+    const items = itemsOverride ?? (Array.isArray(req.body?.brands) ? req.body.brands : []);
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return reply.status(400).send({
+        success: false,
+        message: itemsOverride
+          ? "No brand images found in store catalog to queue for optimization"
+          : "Request body must include a non-empty `brands` array",
+      });
+    }
+
+    const storeHash = req.storeHash;
+    const accessToken = req.accessToken || req.currentUser?.access_token;
+
+    if (!accessToken || !String(accessToken).trim()) {
+      return reply.status(401).send({
+        success: false,
+        message: "BigCommerce access token is missing for this store",
+      });
+    }
+
+    const channelId = parseChannelId(items[0]) || parseChannelId(req.body) || 1;
+
+    const { error: settingError, settings } = await fetchStoreOptimizationSettings(
+      storeHash,
+      channelId
+    );
+    if (settingError) {
+      return reply.status(500).send({ success: false, message: settingError });
+    }
+
+    if (!hasAnyOptimizationFeatureEnabled(settings)) {
+      return reply.status(400).send({
+        success: false,
+        message: "No image optimization features are enabled in store settings",
+        data: { settings },
+      });
+    }
+
+    const jobUuid = crypto.randomUUID();
+    const skipped = [];
+    const toQueue = [];
+    const jobItems = [];
+
+    const forceReoptimize =
+      req.body?.force === true ||
+      req.body?.force_reoptimize === true ||
+      req.body?.reoptimize === true;
+
+    const skipOptimizedIds = forceReoptimize
+      ? new Set()
+      : await getAlreadyOptimizedBrandIdSet(storeHash, items);
+
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index] || {};
+      const shop = item.shop != null ? String(item.shop).trim() : "";
+      const brandId = item.brand_id ?? item.brandId;
+      const imageUrlRaw = item.image_url ?? item.imageUrl;
+      const brandName = item.brand_name ?? item.name ?? null;
+
+      const pushSkipped = (reason) => {
+        skipped.push({
+          index,
+          reason,
+          brand_id: brandId ?? null,
+        });
+        if (brandId != null && brandId !== "") {
+          jobItems.push({
+            job_uuid: jobUuid,
+            store_hash: storeHash,
+            job_type: jobType,
+            brand_id: Number(brandId),
+            image_url: imageUrlRaw ? String(imageUrlRaw).trim() : null,
+            status: "skipped",
+            skip_reason: reason,
+          });
+        }
+      };
+
+      if (shop && shop !== storeHash) {
+        pushSkipped("shop does not match authenticated store");
+        continue;
+      }
+
+      if (brandId == null || brandId === "") {
+        pushSkipped("brand_id is required");
+        continue;
+      }
+
+      if (!imageUrlRaw || !String(imageUrlRaw).trim()) {
+        pushSkipped("image_url is required");
+        continue;
+      }
+
+      const imageUrl = String(imageUrlRaw).trim();
+      const clientStatus = String(item.optimization_status || item.status || "").toLowerCase();
+      const alreadyOptimizedOnClient = ["optimized", "optimizing"].includes(clientStatus);
+
+      if (
+        !forceReoptimize &&
+        (skipOptimizedIds.has(Number(brandId)) || alreadyOptimizedOnClient)
+      ) {
+        pushSkipped("Brand image is already optimized or currently optimizing");
+        continue;
+      }
+
+      jobItems.push({
+        job_uuid: jobUuid,
+        store_hash: storeHash,
+        job_type: jobType,
+        brand_id: Number(brandId),
+        image_url: imageUrl,
+        status: "queued",
+      });
+
+      toQueue.push({
+        index,
+        brandId: Number(brandId),
+        imageUrl,
+        brandName,
+        optimization_status: item.optimization_status || item.status || null,
+      });
+    }
+
+    const { error: createJobError, doc: jobDoc } = await createBrandBulkJob({
+      jobUuid,
+      storeHash,
+      jobType,
+      totalImages: items.length,
+      queuedImages: toQueue.length,
+      skippedImages: skipped.length,
+      jobItems,
+    });
+
+    if (createJobError || !jobDoc) {
+      return reply.status(500).send({
+        success: false,
+        message: createJobError || "Failed to create brand optimization job in database",
+      });
+    }
+
+    if (skipped.length > 0) {
+      const { error: skipLogError } = await writeBrandSkipLogs(
+        skipped.map((s) => ({
+          job_uuid: jobUuid,
+          store_hash: storeHash,
+          job_type: jobType,
+          brand_id: s.brand_id,
+          reason: s.reason,
+          index: s.index,
+        }))
+      );
+      if (skipLogError) {
+        console.error("[queueBulkBrandJobs] skip logs:", skipLogError);
+      }
+    }
+
+    if (toQueue.length > 0) {
+      const BrandImageJobLog = require("../../models/BrandImageJobLog");
+      await BrandImageJobLog.insertMany(
+        toQueue.map((entry) => ({
+          job_uuid: jobUuid,
+          store_hash: storeHash,
+          source_type: "brand",
+          job_type: jobType,
+          brand_id: entry.brandId,
+          log_type: "info",
+          step: "queue",
+          message: "Brand image queued for optimization",
+          meta: { index: entry.index, image_url: entry.imageUrl },
+        })),
+        { ordered: false }
+      );
+    }
+
+    const bullJobs = toQueue.map((entry) => ({
+      name: "optimize-brand",
+      data: {
+        jobUuid,
+        job_type: jobType,
+        storeHash,
+        accessToken,
+        brandId: entry.brandId,
+        imageUrl: entry.imageUrl,
+        brandName: entry.brandName,
+        settings,
+        optimization_status: entry.optimization_status,
+      },
+      opts: {
+        removeOnComplete: 200,
+        removeOnFail: 500,
+        attempts: 2,
+        backoff: { type: "exponential", delay: 5000 },
+      },
+    }));
+
+    const queueResults =
+      bullJobs.length > 0 ? await brandImageQueue.addBulk(bullJobs) : [];
+
+    const jobs = queueResults.map((bullJob, i) => ({
+      index: toQueue[i].index,
+      jobId: bullJob.id,
+      brand_id: toQueue[i].brandId,
+    }));
+
+    const { error: statusError, job: jobRecord } = await getBrandJobStatus(jobUuid, storeHash);
+    if (statusError) {
+      console.error("[queueBulkBrandJobs] status fetch:", statusError);
+    }
+
+    const responseData = {
+      job_uuid: jobUuid,
+      job_type: jobType,
+      queue: "brand-image-optimization",
+      total_brands: items.length,
+      queued_brands: jobs.length,
+      skipped_brands: skipped.length,
+      settings: {
+        optimize_image_enabled: Boolean(settings.optimize_image_enabled),
+        image_quality: settings.image_quality,
+        output_format: settings.output_format,
+      },
+      job: jobRecord,
+      jobs,
+      skipped,
+    };
+
+    if (req.catalogFetchMeta) {
+      responseData.catalog = req.catalogFetchMeta;
+    }
+
+    return reply.status(202).send({
+      success: true,
+      message: "Bulk brand optimization queued",
+      data: responseData,
+    });
+  } catch (error) {
+    console.error("[queueBulkBrandJobs] Error:", error);
+    return reply.status(500).send({
+      success: false,
+      message: error.message || "Failed to queue bulk brand optimization",
+    });
+  }
+}
+
+async function queueBulkBrandRestoreJobs(req, reply, jobType, itemsOverride = null) {
+  try {
+    const items = itemsOverride ?? (Array.isArray(req.body?.brands) ? req.body.brands : []);
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return reply.status(400).send({
+        success: false,
+        message: itemsOverride
+          ? "No restorable brand images found for this store"
+          : "Request body must include a non-empty `brands` array",
+      });
+    }
+
+    const storeHash = req.storeHash;
+    const accessToken = req.accessToken || req.currentUser?.access_token;
+
+    if (!accessToken || !String(accessToken).trim()) {
+      return reply.status(401).send({
+        success: false,
+        message: "BigCommerce access token is missing for this store",
+      });
+    }
+
+    const jobUuid = crypto.randomUUID();
+    const skipped = [];
+    const toQueue = [];
+    const jobItems = [];
+
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index] || {};
+      const shop = item.shop != null ? String(item.shop).trim() : "";
+      const brandId = item.brand_id ?? item.brandId;
+
+      const pushSkipped = (reason) => {
+        skipped.push({ index, reason, brand_id: brandId ?? null });
+        if (brandId != null && brandId !== "") {
+          jobItems.push({
+            job_uuid: jobUuid,
+            store_hash: storeHash,
+            job_type: jobType,
+            brand_id: Number(brandId),
+            status: "skipped",
+            skip_reason: reason,
+          });
+        }
+      };
+
+      if (shop && shop !== storeHash) {
+        pushSkipped("shop does not match authenticated store");
+        continue;
+      }
+
+      if (brandId == null || brandId === "") {
+        pushSkipped("brand_id is required");
+        continue;
+      }
+
+      jobItems.push({
+        job_uuid: jobUuid,
+        store_hash: storeHash,
+        job_type: jobType,
+        brand_id: Number(brandId),
+        status: "queued",
+      });
+
+      toQueue.push({
+        index,
+        brandId: Number(brandId),
+      });
+    }
+
+    const { error: createJobError, doc: jobDoc } = await createBrandBulkJob({
+      jobUuid,
+      storeHash,
+      jobType,
+      totalImages: items.length,
+      queuedImages: toQueue.length,
+      skippedImages: skipped.length,
+      jobItems,
+    });
+
+    if (createJobError || !jobDoc) {
+      return reply.status(500).send({
+        success: false,
+        message: createJobError || "Failed to create brand restore job in database",
+      });
+    }
+
+    if (skipped.length > 0) {
+      const { error: skipLogError } = await writeBrandSkipLogs(
+        skipped.map((s) => ({
+          job_uuid: jobUuid,
+          store_hash: storeHash,
+          job_type: jobType,
+          brand_id: s.brand_id,
+          reason: s.reason,
+          index: s.index,
+        }))
+      );
+      if (skipLogError) {
+        console.error("[queueBulkBrandRestoreJobs] skip logs:", skipLogError);
+      }
+    }
+
+    if (toQueue.length > 0) {
+      const BrandImageJobLog = require("../../models/BrandImageJobLog");
+      await BrandImageJobLog.insertMany(
+        toQueue.map((entry, index) => ({
+          job_uuid: jobUuid,
+          store_hash: storeHash,
+          source_type: "brand",
+          job_type: jobType,
+          brand_id: entry.brandId,
+          log_type: "info",
+          step: "queue",
+          message: "Brand image queued for restore",
+          meta: { index },
+        })),
+        { ordered: false }
+      );
+    }
+
+    const queueResults = await Promise.all(
+      toQueue.map((entry) =>
+        brandImageRestoreQueue.add(
+          "restore-brand",
+          {
+            jobUuid,
+            job_type: jobType,
+            storeHash,
+            accessToken,
+            brandId: entry.brandId,
+          },
+          {
+            removeOnComplete: 200,
+            removeOnFail: 500,
+            attempts: 2,
+            backoff: { type: "exponential", delay: 5000 },
+          }
+        )
+      )
+    );
+
+    const jobs = queueResults.map((bullJob, i) => ({
+      index: toQueue[i].index,
+      jobId: bullJob.id,
+      brand_id: toQueue[i].brandId,
+    }));
+
+    const { error: statusError, job: jobRecord } = await getBrandJobStatus(jobUuid, storeHash);
+    if (statusError) {
+      console.error("[queueBulkBrandRestoreJobs] status fetch:", statusError);
+    }
+
+    const responseData = {
+      job_uuid: jobUuid,
+      job_type: jobType,
+      queue: "brand-image-restore",
+      total_brands: items.length,
+      queued_brands: jobs.length,
+      skipped_brands: skipped.length,
+      job: jobRecord,
+      jobs,
+      skipped,
+    };
+
+    if (req.restoreFetchMeta) {
+      responseData.catalog = req.restoreFetchMeta;
+    }
+
+    return reply.status(202).send({
+      success: true,
+      message: "Bulk brand image restore queued",
+      data: responseData,
+    });
+  } catch (error) {
+    console.error("[queueBulkBrandRestoreJobs] Error:", error);
+    return reply.status(500).send({
+      success: false,
+      message: error.message || "Failed to queue bulk brand image restore",
+    });
+  }
+}

@@ -3,6 +3,27 @@ const path = require("node:path");
 const { BrandImage, BrandImageStatus } = require("../../../models");
 const { deleteFile } = require("../../../utils/deleteFile");
 const { replaceBrandImage, verifyBrandImageUpdate } = require("./bigCommerceBrandImage");
+const {
+  appendBrandImageJobLog,
+  resolveBrandJobUuid,
+} = require("./brandActivityLog");
+
+async function logRestoreStep(logContext, payload) {
+  const storeHash = logContext?.storeHash;
+  const brandId = logContext?.brandId;
+  if (!storeHash || brandId == null) return;
+
+  const jobUuid = resolveBrandJobUuid(logContext, storeHash, brandId);
+  if (!jobUuid) return;
+
+  await appendBrandImageJobLog({
+    jobUuid,
+    storeHash,
+    jobType: logContext.jobType || "restore_single",
+    brandId,
+    ...payload,
+  });
+}
 
 function resolveOutputFormatFromPath(filePath) {
   const ext = path.extname(String(filePath || "")).toLowerCase();
@@ -10,6 +31,90 @@ function resolveOutputFormatFromPath(filePath) {
   if (ext === ".gif") return "gif";
   if (ext === ".ico") return "ico";
   return "jpeg";
+}
+
+async function cleanupStaleBrandOptimizationRecords({ storeHash, brandId, brandImage = null }) {
+  const dbQuery = {
+    store_hash: storeHash,
+    brand_id: Number(brandId),
+  };
+
+  try {
+    await Promise.all([
+      BrandImage.deleteMany(dbQuery),
+      BrandImageStatus.deleteOne(dbQuery),
+    ]);
+  } catch (err) {
+    console.error("[cleanupStaleBrandOptimizationRecords] DB cleanup error:", err.message);
+    return { cleaned: false, error: err.message };
+  }
+
+  const paths = [
+    brandImage?.original_image_path,
+    brandImage?.optimized_image_path,
+  ].filter(Boolean);
+
+  await Promise.all(
+    paths.map((filePath) =>
+      deleteFile(filePath).catch((err) => {
+        console.error("[cleanupStaleBrandOptimizationRecords] delete file:", err.message);
+      })
+    )
+  );
+
+  return { cleaned: true, error: null };
+}
+
+async function isLocalBackupUnavailable(originalPath) {
+  if (!originalPath) {
+    return true;
+  }
+
+  try {
+    const stat = await fs.stat(originalPath);
+    return !stat.isFile();
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Remove BrandImage + BrandImageStatus when local backup is missing or invalid.
+ * Used during restore, brand list fetch, and preview.
+ */
+async function purgeStaleBrandOptimizationIfBackupMissing({ storeHash, brandId }) {
+  const query = {
+    store_hash: storeHash,
+    brand_id: Number(brandId),
+  };
+
+  const [brandImage, brandImageStatus] = await Promise.all([
+    BrandImage.findOne(query).sort({ updated_at: -1 }).lean(),
+    BrandImageStatus.findOne(query).lean(),
+  ]);
+
+  if (!brandImage && !brandImageStatus) {
+    return { cleaned: false, reason: "no_records" };
+  }
+
+  const originalPath = brandImage?.original_image_path || null;
+  const backupUnavailable = await isLocalBackupUnavailable(originalPath);
+
+  if (!backupUnavailable) {
+    return { cleaned: false, reason: "backup_available" };
+  }
+
+  const result = await cleanupStaleBrandOptimizationRecords({
+    storeHash,
+    brandId,
+    brandImage,
+  });
+
+  return {
+    cleaned: result.cleaned,
+    reason: "backup_unavailable",
+    error: result.error || null,
+  };
 }
 
 async function validateBrandRestoreEligibility({ storeHash, brandId }) {
@@ -48,6 +153,8 @@ async function validateBrandRestoreEligibility({ storeHash, brandId }) {
       skipReason:
         "Original image backup path not found in database. The file may have been removed already.",
       statusCode: 404,
+      cleanupStaleRecords: true,
+      brandImage,
     };
   }
 
@@ -60,6 +167,8 @@ async function validateBrandRestoreEligibility({ storeHash, brandId }) {
       skipReason: "Original image backup file is missing on disk. Restore cannot continue.",
       statusCode: 404,
       data: { original_image_path: originalPath },
+      cleanupStaleRecords: true,
+      brandImage,
     };
   }
 
@@ -68,6 +177,8 @@ async function validateBrandRestoreEligibility({ storeHash, brandId }) {
       ok: false,
       skipReason: "Original image backup path does not point to a valid file.",
       statusCode: 400,
+      cleanupStaleRecords: true,
+      brandImage,
     };
   }
 
@@ -83,10 +194,44 @@ async function validateBrandRestoreEligibility({ storeHash, brandId }) {
 /**
  * Restore a brand image to its original backup on BigCommerce and clean up DB/file state.
  */
-async function restoreSingleBrandImage({ storeHash, accessToken, brandId }) {
+async function restoreSingleBrandImage({ storeHash, accessToken, brandId, logContext = null }) {
+  const effectiveLogContext = logContext
+    ? {
+        jobType: "restore_single",
+        brandId,
+        ...logContext,
+        storeHash: logContext.storeHash || storeHash,
+      }
+    : null;
+
   const validation = await validateBrandRestoreEligibility({ storeHash, brandId });
 
   if (!validation.ok) {
+    if (validation.cleanupStaleRecords) {
+      await cleanupStaleBrandOptimizationRecords({
+        storeHash,
+        brandId,
+        brandImage: validation.brandImage || null,
+      });
+
+      await logRestoreStep(effectiveLogContext, {
+        logType: "info",
+        step: "file_cleanup",
+        message: "Removed stale brand optimization records because backup file is unavailable",
+        meta: {
+          brand_id: Number(brandId),
+          original_image_path: validation.data?.original_image_path || null,
+        },
+      });
+    }
+
+    await logRestoreStep(effectiveLogContext, {
+      logType: "warning",
+      step: "skip",
+      message: validation.skipReason,
+      meta: { status_code: validation.statusCode },
+    });
+
     return {
       success: false,
       error: validation.skipReason,
@@ -99,15 +244,44 @@ async function restoreSingleBrandImage({ storeHash, accessToken, brandId }) {
   const { brandImage, originalPath } = validation;
   const outputFormat = resolveOutputFormatFromPath(originalPath);
 
+  await logRestoreStep(effectiveLogContext, {
+    logType: "info",
+    step: "restore",
+    message: "Brand image restore started",
+    meta: { brand_id: Number(brandId), original_image_path: originalPath },
+  });
+
   let fileBuffer;
   try {
     fileBuffer = await fs.readFile(originalPath);
   } catch (readErr) {
+    const msg = readErr.message || "Failed to read original image file from disk";
+
+    await cleanupStaleBrandOptimizationRecords({
+      storeHash,
+      brandId,
+      brandImage,
+    });
+
+    await logRestoreStep(effectiveLogContext, {
+      logType: "info",
+      step: "file_cleanup",
+      message: "Removed stale brand optimization records because backup file could not be read",
+      meta: { brand_id: Number(brandId), original_image_path: originalPath },
+    });
+
+    await logRestoreStep(effectiveLogContext, {
+      logType: "warning",
+      step: "skip",
+      message: msg,
+      meta: { original_image_path: originalPath, error: msg },
+    });
+
     return {
       success: false,
-      error: readErr.message || "Failed to read original image file from disk",
+      error: msg,
       statusCode: 500,
-      skipped: false,
+      skipped: true,
     };
   }
 
@@ -127,6 +301,13 @@ async function restoreSingleBrandImage({ storeHash, accessToken, brandId }) {
       uploadErr?.message ||
       "Failed to upload restored image to BigCommerce";
 
+    await logRestoreStep(effectiveLogContext, {
+      logType: "error",
+      step: "upload",
+      message: uploadErrMsg,
+      meta: { brand_id: Number(brandId), error: uploadErrMsg },
+    });
+
     return {
       success: false,
       error: uploadErrMsg,
@@ -138,6 +319,13 @@ async function restoreSingleBrandImage({ storeHash, accessToken, brandId }) {
   const restoredImageUrl = uploadResult?.image_url || null;
 
   if (!restoredImageUrl) {
+    await logRestoreStep(effectiveLogContext, {
+      logType: "error",
+      step: "upload",
+      message: "BigCommerce did not return an image URL after upload",
+      meta: { brand_id: Number(brandId) },
+    });
+
     return {
       success: false,
       error: "BigCommerce did not return an image URL after upload",
@@ -180,6 +368,17 @@ async function restoreSingleBrandImage({ storeHash, accessToken, brandId }) {
       : Promise.resolve(),
   ]);
 
+  await logRestoreStep(effectiveLogContext, {
+    logType: "info",
+    step: "complete",
+    message: "Brand image restored successfully",
+    meta: {
+      brand_id: Number(brandId),
+      restored_image_url: restoredImageUrl,
+      verified: verification.verified,
+    },
+  });
+
   return {
     success: true,
     error: null,
@@ -202,4 +401,6 @@ async function restoreSingleBrandImage({ storeHash, accessToken, brandId }) {
 module.exports = {
   validateBrandRestoreEligibility,
   restoreSingleBrandImage,
+  purgeStaleBrandOptimizationIfBackupMissing,
+  cleanupStaleBrandOptimizationRecords,
 };

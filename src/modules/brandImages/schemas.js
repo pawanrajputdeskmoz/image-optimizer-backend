@@ -83,6 +83,59 @@ const bulkBrandOptimizeCheckboxSchema = {
     additionalProperties: true,
     properties: {
       ...commonContextProperties,
+      force: { type: ["boolean", "string", "integer"] },
+      force_reoptimize: { type: ["boolean", "string", "integer"] },
+      reoptimize: { type: ["boolean", "string", "integer"] },
+      brands: {
+        type: "array",
+        minItems: 1,
+        items: {
+          type: "object",
+          additionalProperties: true,
+          properties: {
+            brand_id: { type: ["integer", "string"] },
+            image_url: { type: "string" },
+            brand_name: { type: "string" },
+            name: { type: "string" },
+            optimization_status: { type: "string" },
+            status: { type: "string" },
+          },
+        },
+      },
+    },
+  },
+};
+
+const bulkBrandOptimizeAllSchema = {
+  body: {
+    type: "object",
+    additionalProperties: true,
+    properties: {
+      ...commonContextProperties,
+      force: { type: ["boolean", "string", "integer"] },
+      force_reoptimize: { type: ["boolean", "string", "integer"] },
+      reoptimize: { type: ["boolean", "string", "integer"] },
+    },
+  },
+};
+
+const bulkRestoreBrandAllSchema = {
+  body: {
+    type: "object",
+    additionalProperties: true,
+    properties: {
+      ...commonContextProperties,
+    },
+  },
+};
+
+const bulkRestoreBrandCheckboxSchema = {
+  body: {
+    type: "object",
+    required: ["brands"],
+    additionalProperties: true,
+    properties: {
+      ...commonContextProperties,
       brands: {
         type: "array",
         minItems: 1,
@@ -120,5 +173,8 @@ module.exports = {
   getBrandPreviewImgDataSchema,
   restoreBrandSchema,
   bulkBrandOptimizeCheckboxSchema,
+  bulkBrandOptimizeAllSchema,
+  bulkRestoreBrandCheckboxSchema,
+  bulkRestoreBrandAllSchema,
   getBrandJobSchema,
 };

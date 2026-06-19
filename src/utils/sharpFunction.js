@@ -194,6 +194,44 @@ exports.buildOptimizationMetadataFromUrls = async (
 
 const ENCODE_FORMATS = new Set(["jpeg", "png", "webp", "gif", "avif"]);
 
+/** BC-supported output formats per image type (jpg normalizes to jpeg). */
+const ALLOWED_OUTPUT_FORMATS = {
+  product: new Set(["gif", "jpeg", "png", "webp"]),
+  category: new Set(["jpeg", "gif", "png"]),
+  brand: new Set(["jpeg", "png"]),
+};
+
+function normalizeOptimizeFormat(format) {
+  const f = String(format ?? "")
+    .trim()
+    .toLowerCase();
+  if (!f || f === "original" || f === "null") return "original";
+  if (f === "jpg" || f === "jpe") return "jpeg";
+  return f;
+}
+
+function isFormatAllowedForImageType(imageType, format) {
+  const normalized = normalizeOptimizeFormat(format);
+  if (normalized === "original") return false;
+  const allowed = ALLOWED_OUTPUT_FORMATS[imageType];
+  return Boolean(allowed?.has(normalized));
+}
+
+/**
+ * Resolve output format for product / category / brand optimization.
+ * Uses store setting when allowed for that type; otherwise keeps original format.
+ */
+exports.resolveImageTypeOptimizeFormat = (imageType, settingsFormat, originalFormat) => {
+  const setting = normalizeOptimizeFormat(settingsFormat ?? "jpeg");
+  const original = normalizeOptimizeFormat(originalFormat ?? "jpeg");
+
+  if (setting !== "original" && isFormatAllowedForImageType(imageType, setting)) {
+    return setting;
+  }
+
+  return original !== "original" ? original : "jpeg";
+};
+
 function clampQuality(quality, fallback = config.image.encodeQuality) {
   const q = Number(quality);
   if (!Number.isFinite(q)) return fallback;
@@ -261,22 +299,7 @@ function resolveOutputFormat(formatOption, inputFormat, hasAlpha = false) {
     return hasAlpha ? "png" : "jpeg";
   }
 
-  if (requested === "jpeg" || requested === "jpg") {
-    return "jpeg";
-  }
-
-  // PNG with transparency must not be auto-converted to JPEG.
-  if (hasAlpha && (inputFormat === "png" || inputFormat === "webp" || inputFormat === "avif")) {
-    if (requested === "png" || requested === "webp" || requested === "avif") {
-      return normalizeFormat(requested) || "png";
-    }
-    return normalizeFormat(inputFormat) || "png";
-  }
-
-  // Opaque non-PNG → JPEG when PNG output requested (smaller, no alpha needed).
-  if (requested === "png" && !hasAlpha && inputFormat !== "png") {
-    return "jpeg";
-  }
+  if (requested === "jpg" || requested === "jpe") return "jpeg";
 
   return normalizeFormat(requested) || config.image.outputFormat;
 }
