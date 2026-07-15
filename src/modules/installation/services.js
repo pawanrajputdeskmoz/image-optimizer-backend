@@ -49,8 +49,6 @@ exports.buildStoreUpdateFields = (storeInfo, storeHash) => {
   };
 };
 
-
-
 exports.syncUserStoreFromBigCommerce = async (storeHash, accessToken) => {
   const storeInfo = await get(
     `https://api.bigcommerce.com/stores/${storeHash}/v2/store`,
@@ -81,8 +79,6 @@ exports.exchangeOAuthToken = async ({ code, scope, context }) => {
   });
 };
 
-
-
 exports.buildInstallUpdatePayload = ({
   access_token,
   user,
@@ -93,6 +89,7 @@ exports.buildInstallUpdatePayload = ({
   access_token,
   lastInstalledAt: new Date(),
   installStatus: "installed",
+  selectedPlan: "free",
   scope,
   email: user.email,
   username: `${storeInfo.first_name || ""} ${storeInfo.last_name || ""}`.trim(),
@@ -106,16 +103,13 @@ exports.saveInstalledStore = async ({
   scope,
   storeInfo,
 }) => {
-  
-  let updatePayload = {
+  const updatePayload = exports.buildInstallUpdatePayload({
     access_token,
-    lastInstalledAt: new Date(),
-    installStatus: "installed",
+    user,
     scope,
-    email: user.email,
-    username: `${storeInfo.first_name || ""} ${storeInfo.last_name || ""}`.trim(),
-    ...exports.buildStoreUpdateFields(storeInfo, storeHash),
-  }
+    storeInfo,
+    storeHash,
+  });
 
   return User.findOneAndUpdate(
     { store_hash: storeHash },
@@ -127,16 +121,16 @@ exports.saveInstalledStore = async ({
         store_id: storeInfo.id,
       },
     },
-    { upsert: true }
-  );
+    { upsert: true, new: true }
+  ).then(async (user) => {
+    const { ensureClientPlan } = require("../plans/service");
+    await ensureClientPlan(storeHash, "free");
+    return user;
+  });
 };
 
 exports.getManageAppRedirectUrl = (storeHash) =>
   `https://store-${storeHash}.mybigcommerce.com/manage/app/${process.env.BIG_COMMERCE_APP_ID}`;
-
-
-
-
 
 exports.verifySignedPayloadJwt = (signedPayloadJwt, options = {}) =>
   jwt.verify(signedPayloadJwt, process.env.BIG_COMMERCE_CLIENT_SECRET, {

@@ -20,6 +20,8 @@ const {
   brandImagesRoutes,
   installationRoutes,
   settingRoutes,
+  adminRoutes,
+  paymentRoutes,
 } = require("./modules");
 const { connectMongo } = require("./db/mongo");
 
@@ -36,10 +38,11 @@ async function buildApp() {
   registerStorageFiles(app);
 
   await app.register(imageOptimizationRoutes, { prefix: "/api/image-optimizer" });
-  // await app.register(homeImagesRoutes, { prefix: "/api/image-optimizer" });
   await app.register(categoryImagesRoutes, { prefix: "/api/category-images" });
   await app.register(brandImagesRoutes, { prefix: "/api/brand-images" });
   await app.register(settingRoutes, { prefix: "/api/settings" });
+  await app.register(paymentRoutes, { prefix: "/api/payment" });
+  await app.register(adminRoutes, { prefix: "/api/admin" });
   await app.register(installationRoutes, { prefix: "/store" });
   await app.register(homeImagesRoutes, {
     prefix: "/api/home-images",
@@ -91,6 +94,31 @@ function multipartPlugin() {
   return multipartModule.default ?? multipartModule;
 }
 
+function isOriginAllowed(origin, allowedOrigins) {
+  if (!origin) return false;
+  if (allowedOrigins.length === 0) return true;
+  if (allowedOrigins.includes(origin)) return true;
+  if (origin.endsWith(".shares.zrok.io") && allowedOrigins.includes("*.shares.zrok.io")) {
+    return true;
+  }
+
+  if (process.env.NODE_ENV === "development") {
+    try {
+      const { hostname, protocol } = new URL(origin);
+      if (
+        (hostname === "localhost" || hostname === "127.0.0.1") &&
+        (protocol === "http:" || protocol === "https:")
+      ) {
+        return true;
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
+}
+
 function registerCors(app) {
   const allowedOrigins = (process.env.CORS_ORIGINS ?? "")
     .split(",")
@@ -101,13 +129,7 @@ function registerCors(app) {
     const origin = request.headers.origin ?? request.headers.Origin;
     if (!origin) return false;
 
-    const allowAll = allowedOrigins.length === 0;
-    const isAllowed =
-      allowAll ||
-      allowedOrigins.includes(origin) ||
-      (origin.endsWith(".shares.zrok.io") && allowedOrigins.includes("*.shares.zrok.io"));
-
-    if (!isAllowed) return false;
+    if (!isOriginAllowed(origin, allowedOrigins)) return false;
 
     reply.header("access-control-allow-origin", origin);
     reply.header("vary", "origin");
@@ -120,7 +142,7 @@ function registerCors(app) {
     reply.header(
       "access-control-allow-headers",
       requestedHeaders ||
-        "authorization,content-type,accept,origin,x-requested-with,api-token,app-activant,app-key"
+        "authorization,content-type,accept,origin,x-requested-with,api-token,app-activant,app-key,x-admin-key"
     );
 
     return true;

@@ -13,6 +13,7 @@ const {
   appendBrandImageJobLog,
   resolveBrandJobUuid,
 } = require("./brandActivityLog");
+const { recordMonthlyOptimization } = require("../../../utils/monthlyUsage");
 
 function clampQuality(quality, fallback = 80) {
   const q = Number(quality);
@@ -66,6 +67,27 @@ exports.compressBrandImage = async ({
     ...logContext,
     storeHash: logContext?.storeHash || storeHash,
   };
+
+  if (!logContext?.skipQuotaCheck) {
+    const User = require("../../../models/User");
+    const { canOptimizeImages } = require("../../plans/service");
+    const user = await User.findOne({ store_hash: storeHash })
+      .select({ selectedPlan: 1 })
+      .lean();
+    const quota = await canOptimizeImages(storeHash, user?.selectedPlan || "free", 1);
+    if (!quota.allowed) {
+      const { clearStoreOptimizationJobs } = require("../../../queue/imageOptimizationQueues");
+      await clearStoreOptimizationJobs(storeHash).catch((err) => {
+        console.error("[compressBrandImage] clearStoreOptimizationJobs:", err?.message);
+      });
+      return {
+        success: false,
+        plan_limit: true,
+        error: quota.message,
+        code: quota.code,
+      };
+    }
+  }
 
   let originalImagePath = null;
   let optimizedImagePath = null;
@@ -469,6 +491,10 @@ async function updateStoreStats({ storeHash, originalSize, optimizedSize, savedB
         { $set: { average_saving_percent: (totalSaved / totalOrig) * 100 } }
       );
     }
+
+    recordMonthlyOptimization(storeHash, "brand").catch((err) => {
+      console.error("[compressBrandImage] monthly usage track failed:", err);
+    });
   } catch (statErr) {
     console.error("[compressBrandImage] StoreImageStat error:", statErr);
   }

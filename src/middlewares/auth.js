@@ -31,9 +31,7 @@ async function authStore(req, reply) {
         success: false,
         message: "Token is not valid",
       });
-    } 
-
-    console.log("storeHash", storeHash);
+    }
 
     const user = await User.findOne({ store_hash: storeHash });
     if (!user) {

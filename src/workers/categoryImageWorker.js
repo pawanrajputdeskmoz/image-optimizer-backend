@@ -6,15 +6,18 @@ const { Worker } = require("bullmq");
 const { createRedisConnection } = require("../db/redis");
 const { connectMongo } = require("../db/mongo");
 const { QUEUE_NAME } = require("../queue/categoryImageQueue");
+const { getJobAttempts } = require("../queue/workerJobOptions");
 const { compressCategoryImage } = require("../modules/categoryImages/utils/compressCategoryImage");
 const {
   setCategoryJobItemStatus,
   recordCategoryJobItemResult,
   shouldSkipCategoryOptimization,
+  processWebhookCategoryBurst,
 } = require("../modules/categoryImages/services");
 const {
   appendCategoryImageLog,
 } = require("../modules/categoryImages/utils/categoryActivityLog");
+const WORKER_NAME = "category-image";
 
 const envPath = [
   path.join(process.cwd(), ".env"),
@@ -28,10 +31,15 @@ let worker;
 
 async function startWorker() {
   await connectMongo();
-
   worker = new Worker(
     QUEUE_NAME,
     async (job) => {
+      if (job.name === "category-webhook-process") {
+        const result = await processWebhookCategoryBurst(job.data?.storeHash);
+        console.log("[category-image-worker] category-webhook-process", result);
+        return result;
+      }
+
       const {
         jobUuid,
         job_type: jobType = "checkBox",
@@ -46,7 +54,7 @@ async function startWorker() {
         optimization_status,
       } = job.data;
 
-      const maxAttempts = job.opts.attempts || 1;
+      const maxAttempts = job.opts?.attempts || getJobAttempts();
       const isLastAttempt = job.attemptsMade + 1 >= maxAttempts;
 
       const logContext = jobUuid
@@ -95,6 +103,7 @@ async function startWorker() {
             const { error: recordError } = await recordCategoryJobItemResult({
               jobUuid,
               categoryId,
+              storeHash,
               success: false,
               skipped: true,
               skipReason: skipMessage,
@@ -133,6 +142,7 @@ async function startWorker() {
           await recordCategoryJobItemResult({
             jobUuid,
             categoryId,
+            storeHash,
             success: false,
             errorMessage: errMsg,
           });
@@ -198,6 +208,7 @@ async function startWorker() {
         const { error: recordError } = await recordCategoryJobItemResult({
           jobUuid,
           categoryId,
+          storeHash,
           success,
           errorMessage: success ? null : errorMessage,
           savedBytes: compression?.savedBytes ?? null,

@@ -1,5 +1,6 @@
 const {
   fetchAllProducts,
+  getStoreDashboardStats,
   singleImageOptimization,
   bulkImageOptimization,
   bulkImageOptimizationCheckbox,
@@ -21,6 +22,7 @@ const {
   restoreImageSchema,
   bulkRestoreSchema,
   bulkRestoreAllSchema,
+  getStoreDashboardStatsSchema,
 } = require("./schemas");
 const { authStore } = require("../../middlewares/auth");
 
@@ -29,6 +31,11 @@ async function imageOptimizationRoutes(app) {
     preHandler: authStore,
     schema: fetchAllProductsSchema,
   }, fetchAllProducts);
+
+  app.get("/store-stats", {
+    preHandler: authStore,
+    schema: getStoreDashboardStatsSchema,
+  }, getStoreDashboardStats);
 
   app.post(
     "/single-image-optimization/:image_id",

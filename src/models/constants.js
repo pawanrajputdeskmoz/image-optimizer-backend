@@ -21,7 +21,7 @@ const JOB_TYPES = [
 
 const JOB_TYPES_SET = new Set(JOB_TYPES);
 
-const IMAGE_JOB_STATUSES = ["pending", "fetching", "processing", "completed", "failed"];
+const IMAGE_JOB_STATUSES = ["pending", "fetching", "processing", "paused_plan_limit", "completed", "failed"];
 
 const IMAGE_JOB_ITEM_STATUSES = [
   "queued",
@@ -47,6 +47,14 @@ const LOG_TYPES = ["info", "warning", "error"];
 
 const LOG_STEPS = [
   "queue",
+  "queue_ready",
+  "redis_queued",
+  "redis_duplicate",
+  "redis_cleared",
+  "worker_picked",
+  "worker_start",
+  "worker_success",
+  "worker_failed",
   "skip",
   "skip_upload",
   "download",
@@ -63,7 +71,37 @@ const LOG_STEPS = [
   "file_cleanup",
   "worker",
   "complete",
+  "plan_limit",
 ];
+
+const WEBHOOK_LOG_STEPS = [
+  "received",
+  "auth_verified",
+  "auth_rejected",
+  "payload_invalid",
+  "scope_ignored",
+  "store_lookup",
+  "store_not_found",
+  "burst_track",
+  "burst_job_scheduled",
+  "burst_limit_exceeded",
+  "accepted",
+  "deduplicated",
+  "burst_process_start",
+  "burst_ignored",
+  "settings_check",
+  "product_images_fetch",
+  "category_images_fetch",
+  "no_images",
+  "job_create",
+  "optimize_queued",
+  "complete",
+  "failed",
+  "webhook_register",
+  "webhook_disable",
+];
+
+const WEBHOOK_LOG_STEPS_SET = new Set(WEBHOOK_LOG_STEPS);
 
 const RESTORE_JOB_TYPES = [
   "restore_single",
@@ -127,6 +165,8 @@ module.exports = {
   IMAGE_UPDATE_STATUS_VALUES,
   LOG_TYPES,
   LOG_STEPS,
+  WEBHOOK_LOG_STEPS,
+  WEBHOOK_LOG_STEPS_SET,
   HOME_BANNER_SOURCE_TYPES,
   HOME_BANNER_OPTIMIZATION_STATUSES,
   CATEGORY_IMAGE_STATUS_VALUES,

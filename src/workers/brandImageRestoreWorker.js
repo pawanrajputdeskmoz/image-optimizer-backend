@@ -6,12 +6,14 @@ const { Worker } = require("bullmq");
 const { createRedisConnection } = require("../db/redis");
 const { connectMongo } = require("../db/mongo");
 const { QUEUE_NAME } = require("../queue/brandImageRestoreQueue");
+const { getJobAttempts } = require("../queue/workerJobOptions");
 const {
   restoreBrandImageSingle,
   setBrandJobItemStatus,
   recordBrandJobItemResult,
 } = require("../modules/brandImages/services");
 const { appendBrandImageJobLog } = require("../modules/brandImages/utils/brandActivityLog");
+const WORKER_NAME = "brand-image-restore";
 
 const envPath = [
   path.join(process.cwd(), ".env"),
@@ -25,7 +27,6 @@ let worker;
 
 async function startWorker() {
   await connectMongo();
-
   worker = new Worker(
     QUEUE_NAME,
     async (job) => {
@@ -37,7 +38,7 @@ async function startWorker() {
         brandId,
       } = job.data;
 
-      const maxAttempts = job.opts.attempts || 1;
+      const maxAttempts = job.opts?.attempts || getJobAttempts();
       const isLastAttempt = job.attemptsMade + 1 >= maxAttempts;
 
       const logContext = jobUuid
@@ -85,6 +86,7 @@ async function startWorker() {
               await recordBrandJobItemResult({
                 jobUuid,
                 brandId,
+                storeHash,
                 success: false,
                 skipped: true,
                 skipReason: errorMessage,
@@ -113,6 +115,7 @@ async function startWorker() {
         const { error: recordError } = await recordBrandJobItemResult({
           jobUuid,
           brandId,
+          storeHash,
           success,
           errorMessage: success ? null : errorMessage,
           successStatus: "restored",

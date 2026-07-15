@@ -1,0 +1,131 @@
+const WebhookLog = require("../../../models/WebhookLog");
+const StoreWebhookEvent = require("../../../models/StoreWebhookEvent");
+const { WEBHOOK_LOG_STEPS_SET } = require("../../../models/constants");
+
+function buildWebhookTraceId(storeHash, eventHash) {
+  if (!storeHash || !eventHash) {
+    return null;
+  }
+
+  return `webhook-${storeHash}-${eventHash}`;
+}
+
+function buildBurstTraceId(storeHash, burstKey) {
+  return `webhook-burst-${storeHash}-${burstKey}`;
+}
+
+function resolveTraceId({ traceId, storeHash, eventHash }) {
+  return traceId || buildWebhookTraceId(storeHash, eventHash) || `webhook-${storeHash}-${Date.now()}`;
+}
+
+async function nextWebhookLogSequence(traceId) {
+  const lastLog = await WebhookLog.findOne({ trace_id: traceId })
+    .sort({ sequence: -1 })
+    .select({ sequence: 1 })
+    .lean();
+
+  return (lastLog?.sequence || 0) + 1;
+}
+
+async function appendWebhookLog({
+  traceId = null,
+  storeHash,
+  eventHash = null,
+  scope = null,
+  productId = null,
+  imageId = null,
+  logType = "info",
+  step = null,
+  message,
+  meta = {},
+}) {
+  if (!storeHash || !message) {
+    return { error: "storeHash and message are required for webhook activity log" };
+  }
+
+  if (step && !WEBHOOK_LOG_STEPS_SET.has(step)) {
+    return { error: `Invalid webhook log step: ${step}` };
+  }
+
+  try {
+    const resolvedTraceId = resolveTraceId({ traceId, storeHash, eventHash });
+    const sequence = await nextWebhookLogSequence(resolvedTraceId);
+
+    await WebhookLog.create({
+      trace_id: resolvedTraceId,
+      store_hash: storeHash,
+      event_hash: eventHash,
+      scope,
+      product_id: productId,
+      image_id: imageId,
+      log_type: logType,
+      step,
+      sequence,
+      message: String(message),
+      meta,
+    });
+    return { error: null };
+  } catch (err) {
+    console.error("[appendWebhookLog]", err.message, {
+      traceId,
+      storeHash,
+      step,
+      logType,
+    });
+    return { error: err.message };
+  }
+}
+
+async function upsertWebhookEvent({
+  traceId = null,
+  storeHash,
+  eventHash,
+  scope = null,
+  productId = null,
+  storeId = null,
+  status = "received",
+  payload = null,
+  errorMessage = null,
+}) {
+  if (!storeHash || !eventHash) {
+    return { error: "storeHash and eventHash are required for webhook event" };
+  }
+
+  try {
+    await StoreWebhookEvent.findOneAndUpdate(
+      { store_hash: storeHash, event_hash: eventHash },
+      {
+        $set: {
+          trace_id: resolveTraceId({ traceId, storeHash, eventHash }),
+          store_hash: storeHash,
+          event_hash: eventHash,
+          scope,
+          product_id: productId,
+          store_id: storeId,
+          status,
+          payload,
+          error_message: errorMessage,
+          received_at: new Date(),
+        },
+      },
+      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
+    ).lean();
+    return { error: null };
+  } catch (err) {
+    console.error("[upsertWebhookEvent]", err.message, {
+      traceId,
+      storeHash,
+      eventHash,
+      status,
+    });
+    return { error: err.message };
+  }
+}
+
+module.exports = {
+  appendWebhookLog,
+  upsertWebhookEvent,
+  buildWebhookTraceId,
+  buildBurstTraceId,
+  resolveTraceId,
+};

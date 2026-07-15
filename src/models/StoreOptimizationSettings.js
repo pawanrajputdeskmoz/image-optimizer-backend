@@ -111,10 +111,13 @@ const StoreOptimizationSettingsSchema = new mongoose.Schema(
 
     auto_optimize_new_images: {
       type: Boolean,
-      default: true,
+      default: false,
     },
 
-
+    auto_optimize_new_category_images: {
+      type: Boolean,
+      default: false,
+    },
 
   },
   {

@@ -1,6 +1,5 @@
 const crypto = require("node:crypto");
-const { User, BrandImage, BrandImageStatus } = require("../../models");
-const { performance } = require("perf_hooks");
+const { BrandImage, BrandImageStatus } = require("../../models");
 const config = require("../../config");
 const {
   fetchBrandImages,
@@ -13,6 +12,7 @@ const {
   getBrandJobStatus,
   writeBrandSkipLogs,
   purgeStaleBrandOptimizationIfBackupMissing,
+  registerPendingBrandImages,
 } = require("./services");
 const {
   normalizePagination,
@@ -23,10 +23,18 @@ const {
 const { parseChannelId } = require("../../utils/channelContext");
 const { brandImageQueue } = require("../../queue/brandImageQueue");
 const { brandImageRestoreQueue } = require("../../queue/brandImageRestoreQueue");
+const {
+  replyIfBulkOptimizationBlocked,
+  buildBulkQueuedMessage,
+  isFullBulkOptimizationJobType,
+} = require("../../utils/bulkOptimizationGuard");
+const {
+  replyIfBulkRestoreBlocked,
+  buildBulkRestoreQueuedMessage,
+} = require("../../utils/bulkRestoreGuard");
+const { defaultWorkerJobOptions } = require("../../queue/workerJobOptions");
 
 exports.fetchAllBrands = async (req, reply) => {
-  const apiStart = performance.now();
-
   try {
     const body = req.body || {};
     const storeHash = req.storeHash;
@@ -38,19 +46,16 @@ exports.fetchAllBrands = async (req, reply) => {
       });
     }
 
-    const { page, limit } = normalizePagination(body);
+    const { page, limit } = normalizePagination(body, {
+      maxLimit: config.pagination.brandMaxLimit,
+    });
 
     const searchKeyword =
       typeof req.query?.search === "string"
         ? req.query.search.trim()
         : "";
 
-    const user = await User.findOne(
-      { store_hash: storeHash },
-      { storeUrl: 1, _id: 0 }
-    ).lean();
-
-    if (!user) {
+    if (!req.currentUser) {
       return reply.status(404).send({
         success: false,
         message: "Store is not installed. User not found for this store_hash",
@@ -66,24 +71,14 @@ exports.fetchAllBrands = async (req, reply) => {
       });
     }
 
-    const bcStart = performance.now();
-
     const result = await fetchBrandImages({
       storeHash,
       accessToken,
-      storeUrl: user.storeUrl || null,
+      storeUrl: req.currentUser.storeUrl || null,
       page,
       limit,
       search: searchKeyword,
     });
-
-    console.log(
-      `[BigCommerce API] brands ${(performance.now() - bcStart).toFixed(2)} ms`
-    );
-
-    console.log(
-      `[fetchAllBrands] Total API Time: ${(performance.now() - apiStart).toFixed(2)} ms`
-    );
 
     return reply.status(200).send({
       success: true,
@@ -467,6 +462,14 @@ async function queueBulkBrandJobs(req, reply, jobType, itemsOverride = null) {
     }
 
     const storeHash = req.storeHash;
+
+    if (
+      isFullBulkOptimizationJobType(jobType) &&
+      (await replyIfBulkOptimizationBlocked(reply, storeHash, "brand"))
+    ) {
+      return;
+    }
+
     const accessToken = req.accessToken || req.currentUser?.access_token;
 
     if (!accessToken || !String(accessToken).trim()) {
@@ -596,6 +599,13 @@ async function queueBulkBrandJobs(req, reply, jobType, itemsOverride = null) {
       });
     }
 
+    if (toQueue.length > 0) {
+      await registerPendingBrandImages(
+        storeHash,
+        toQueue.map((entry) => entry.brandId)
+      );
+    }
+
     if (skipped.length > 0) {
       const { error: skipLogError } = await writeBrandSkipLogs(
         skipped.map((s) => ({
@@ -643,12 +653,7 @@ async function queueBulkBrandJobs(req, reply, jobType, itemsOverride = null) {
         settings,
         optimization_status: entry.optimization_status,
       },
-      opts: {
-        removeOnComplete: 200,
-        removeOnFail: 500,
-        attempts: 2,
-        backoff: { type: "exponential", delay: 5000 },
-      },
+      opts: defaultWorkerJobOptions(),
     }));
 
     const queueResults =
@@ -688,8 +693,11 @@ async function queueBulkBrandJobs(req, reply, jobType, itemsOverride = null) {
 
     return reply.status(202).send({
       success: true,
-      message: "Bulk brand optimization queued",
-      data: responseData,
+      message: buildBulkQueuedMessage("brand"),
+      data: {
+        ...responseData,
+        entity_type: "brand",
+      },
     });
   } catch (error) {
     console.error("[queueBulkBrandJobs] Error:", error);
@@ -714,6 +722,16 @@ async function queueBulkBrandRestoreJobs(req, reply, jobType, itemsOverride = nu
     }
 
     const storeHash = req.storeHash;
+
+    // Full restore_bulk stays blocked if any restore/optimize is active.
+    // restore_checkbox mirrors checkBox optimize — overlapping checkbox restores allowed.
+    if (
+      jobType === "restore_bulk" &&
+      (await replyIfBulkRestoreBlocked(reply, storeHash, "brand"))
+    ) {
+      return;
+    }
+
     const accessToken = req.accessToken || req.currentUser?.access_token;
 
     if (!accessToken || !String(accessToken).trim()) {
@@ -833,12 +851,7 @@ async function queueBulkBrandRestoreJobs(req, reply, jobType, itemsOverride = nu
             accessToken,
             brandId: entry.brandId,
           },
-          {
-            removeOnComplete: 200,
-            removeOnFail: 500,
-            attempts: 2,
-            backoff: { type: "exponential", delay: 5000 },
-          }
+          defaultWorkerJobOptions()
         )
       )
     );
@@ -872,8 +885,11 @@ async function queueBulkBrandRestoreJobs(req, reply, jobType, itemsOverride = nu
 
     return reply.status(202).send({
       success: true,
-      message: "Bulk brand image restore queued",
-      data: responseData,
+      message: buildBulkRestoreQueuedMessage("brand"),
+      data: {
+        ...responseData,
+        entity_type: "brand",
+      },
     });
   } catch (error) {
     console.error("[queueBulkBrandRestoreJobs] Error:", error);

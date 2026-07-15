@@ -1,6 +1,17 @@
 const StoreOptimizationSettings = require("../../models/StoreOptimizationSettings");
 const { get } = require("../../utils/axiosUtils");
 const config = require("../../config");
+const {
+  registerProductCreatedWebhook,
+  disableProductWebhooks,
+  registerCategoryCreatedWebhook,
+  disableCategoryWebhooks,
+  getClientDashboardStats,
+  listActivePlans,
+  selectClientPlan,
+  upgradeClientPlan,
+  getClientMonthlyUsageHistory,
+} = require("./services");
 
 exports.getChannels = async (req, reply) => {
   const { storeHash, accessToken } = req;
@@ -119,7 +130,6 @@ const ALLOWED_KEYS = new Set([
   "alt_text_template",
   "image_quality",
   "output_format",
-  "auto_optimize_new_images",
 ]);
 
 exports.upsertStoreOptimizationSettings = async (req, reply) => {
@@ -150,4 +160,308 @@ exports.upsertStoreOptimizationSettings = async (req, reply) => {
     message: "Settings saved",
     data: doc.toObject(),
   });
+};
+
+exports.registerProductCreatedWebhookHandler = async (req, reply) => {
+  const { storeHash, accessToken } = req;
+
+  if (!accessToken) {
+    return reply.status(401).send({
+      success: false,
+      message: "Access token not found",
+    });
+  }
+
+  try {
+    const result = await registerProductCreatedWebhook({ storeHash, accessToken });
+
+    return reply.send({
+      success: true,
+      message: result.alreadyExists
+        ? "Product webhooks are already registered"
+        : "Product webhooks registered successfully",
+      data: result,
+    });
+  } catch (error) {
+    const status = error?.statusCode || error?.response?.status || 500;
+
+    const message =
+      error?.response?.data?.title ||
+      error?.response?.data?.message ||
+      error?.message ||
+      "Failed to register product webhooks on BigCommerce";
+
+    return reply.status(status).send({
+      success: false,
+      message,
+    });
+  }
+};
+
+exports.disableProductCreatedWebhookHandler = async (req, reply) => {
+  const { storeHash, accessToken } = req;
+
+  if (!accessToken) {
+    return reply.status(401).send({
+      success: false,
+      message: "Access token not found",
+    });
+  }
+
+  try {
+    const result = await disableProductWebhooks({ storeHash, accessToken });
+
+    return reply.send({
+      success: true,
+      message: result.notFound
+        ? "No product webhooks were registered"
+        : "Product webhooks disabled successfully",
+      data: result,
+    });
+  } catch (error) {
+    const status = error?.statusCode || error?.response?.status || 500;
+
+    const message =
+      error?.response?.data?.title ||
+      error?.response?.data?.message ||
+      error?.message ||
+      "Failed to disable product webhooks on BigCommerce";
+
+    return reply.status(status).send({
+      success: false,
+      message,
+    });
+  }
+};
+
+exports.registerCategoryCreatedWebhookHandler = async (req, reply) => {
+  const { storeHash, accessToken } = req;
+
+  if (!accessToken) {
+    return reply.status(401).send({
+      success: false,
+      message: "Access token not found",
+    });
+  }
+
+  try {
+    const result = await registerCategoryCreatedWebhook({ storeHash, accessToken });
+
+    return reply.send({
+      success: true,
+      message: result.alreadyExists
+        ? "Category webhooks are already registered"
+        : "Category webhooks registered successfully",
+      data: result,
+    });
+  } catch (error) {
+    const status = error?.statusCode || error?.response?.status || 500;
+
+    const message =
+      error?.response?.data?.title ||
+      error?.response?.data?.message ||
+      error?.message ||
+      "Failed to register category webhooks on BigCommerce";
+
+    return reply.status(status).send({
+      success: false,
+      message,
+    });
+  }
+};
+
+exports.disableCategoryCreatedWebhookHandler = async (req, reply) => {
+  const { storeHash, accessToken } = req;
+
+  if (!accessToken) {
+    return reply.status(401).send({
+      success: false,
+      message: "Access token not found",
+    });
+  }
+
+  try {
+    const result = await disableCategoryWebhooks({ storeHash, accessToken });
+
+    return reply.send({
+      success: true,
+      message: result.notFound
+        ? "No category webhooks were registered"
+        : "Category webhooks disabled successfully",
+      data: result,
+    });
+  } catch (error) {
+    const status = error?.statusCode || error?.response?.status || 500;
+
+    const message =
+      error?.response?.data?.title ||
+      error?.response?.data?.message ||
+      error?.message ||
+      "Failed to disable category webhooks on BigCommerce";
+
+    return reply.status(status).send({
+      success: false,
+      message,
+    });
+  }
+};
+
+exports.getClientDashboardStatsHandler = async (req, reply) => {
+  try {
+    const storeHash = req.storeHash;
+    const selectedPlan = req.currentUser?.selectedPlan || "free";
+    const { error, data } = await getClientDashboardStats(storeHash, selectedPlan);
+
+    if (error) {
+      return reply.status(500).send({
+        success: false,
+        message: error,
+      });
+    }
+
+    return reply.send({
+      success: true,
+      message: "Dashboard stats loaded",
+      data,
+    });
+  } catch (error) {
+    console.error("[getClientDashboardStatsHandler]", error);
+    return reply.status(500).send({
+      success: false,
+      message: error.message || "Failed to load dashboard stats",
+    });
+  }
+};
+
+exports.listPlansHandler = async (req, reply) => {
+  try {
+    const { error, data } = await listActivePlans(req.storeHash);
+
+    if (error) {
+      return reply.status(500).send({
+        success: false,
+        message: error,
+      });
+    }
+
+    return reply.send({
+      success: true,
+      message: "Plans loaded",
+      data,
+    });
+  } catch (error) {
+    console.error("[listPlansHandler]", error);
+    return reply.status(500).send({
+      success: false,
+      message: error.message || "Failed to load plans",
+    });
+  }
+};
+
+exports.getMonthlyUsageHistoryHandler = async (req, reply) => {
+  try {
+    const limit = Number(req.query?.limit) || 12;
+    const { error, data } = await getClientMonthlyUsageHistory(req.storeHash, { limit });
+
+    if (error) {
+      return reply.status(500).send({
+        success: false,
+        message: error,
+      });
+    }
+
+    return reply.send({
+      success: true,
+      message: "Monthly usage history loaded",
+      data,
+    });
+  } catch (error) {
+    console.error("[getMonthlyUsageHistoryHandler]", error);
+    return reply.status(500).send({
+      success: false,
+      message: error.message || "Failed to load monthly usage history",
+    });
+  }
+};
+
+exports.selectPlanHandler = async (req, reply) => {
+  try {
+    const storeHash = req.storeHash;
+    const planSlug = req.body?.plan_slug || req.body?.plan;
+
+    if (!planSlug) {
+      return reply.status(400).send({
+        success: false,
+        message: "plan_slug is required",
+      });
+    }
+
+    const { error, data } = await selectClientPlan(storeHash, planSlug);
+
+    if (error) {
+      const status = error === "Plan not found or inactive" ? 404 : 400;
+      return reply.status(status).send({
+        success: false,
+        message: error,
+      });
+    }
+
+    return reply.send({
+      success: true,
+      message: "Plan updated successfully",
+      data,
+    });
+  } catch (error) {
+    console.error("[selectPlanHandler]", error);
+    return reply.status(500).send({
+      success: false,
+      message: error.message || "Failed to update plan",
+    });
+  }
+};
+
+exports.upgradePlanHandler = async (req, reply) => {
+  try {
+    const storeHash = req.storeHash;
+    const planSlug = req.body?.plan_slug || req.body?.plan;
+
+    if (!planSlug) {
+      return reply.status(400).send({
+        success: false,
+        message: "plan_slug is required",
+      });
+    }
+
+    const { error, code, data } = await upgradeClientPlan(storeHash, planSlug);
+
+    if (error) {
+      const statusByCode = {
+        PLAN_NOT_FOUND: 404,
+        STORE_NOT_FOUND: 404,
+        SAME_PLAN: 409,
+        NOT_AN_UPGRADE: 400,
+      };
+      const status = statusByCode[code] || 400;
+
+      return reply.status(status).send({
+        success: false,
+        message: error,
+        code,
+        data: data || null,
+      });
+    }
+
+    return reply.send({
+      success: true,
+      message: "Plan upgraded successfully",
+      code,
+      data,
+    });
+  } catch (error) {
+    console.error("[upgradePlanHandler]", error);
+    return reply.status(500).send({
+      success: false,
+      message: error.message || "Failed to upgrade plan",
+    });
+  }
 };

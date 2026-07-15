@@ -1,222 +1,54 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const { config: loadEnv } = require("dotenv");
-const appConfig = require("../config");
 const { Worker } = require("bullmq");
 const { createRedisConnection } = require("../db/redis");
 const { connectMongo } = require("../db/mongo");
-const { QUEUE_NAME } = require("../queue/imageOptimizationQueue");
-const { compressImage } = require("../modules/imageOptimization/utils/compressImage");
-const { resolveProductImageUrl } = require("../modules/imageOptimization/utils/urls");
 const {
-  setJobItemStatus,
-  recordOptimizationJobImageResult,
-  appendImageLog,
-  shouldSkipImageOptimization,
-} = require("../modules/imageOptimization/services");
-
+  resolveTier,
+  getQueueNameForTier,
+  getWorkerConcurrencyForTier,
+  LEGACY_QUEUE_NAME,
+  STANDARD_TIERS,
+} = require("../queue/imageOptimizationQueues");
+const { processImageOptimizationJob } = require("./imageOptimizationProcessor");
+const { appendImageLog } = require("../modules/imageOptimization/services");
 const envPath = [path.join(process.cwd(), ".env"), path.join(__dirname, "../.env")].find(
   (p) => fs.existsSync(p)
 );
 if (envPath) loadEnv({ path: envPath });
 
-const connection = createRedisConnection("bullmq-image-optimization-worker");
+const tierFromEnv = resolveTier(
+  process.env.IMAGE_OPTIMIZATION_QUEUE_TIER || process.env.OPTIMIZATION_QUEUE_TIER
+);
+const listenLegacy =
+  String(process.env.IMAGE_OPTIMIZATION_LISTEN_LEGACY || "").toLowerCase() ===
+  "true";
 
-let worker;
+function tiersToStart() {
+  if (tierFromEnv) {
+    return [tierFromEnv];
+  }
+  // Heavy pool is only started on demand by optimizationHeavySupervisor.
+  return [...STANDARD_TIERS];
+}
 
-async function startWorker() {
-  await connectMongo();
+function resolveWorkerName() {
+  if (tierFromEnv === "2") return "image-optimization-2";
+  if (tierFromEnv === "3") return "image-optimization-3";
+  if (tierFromEnv === "heavy") return "image-optimization-heavy";
+  return "image-optimization-2";
+}
 
-  worker = new Worker(
-    QUEUE_NAME,
-    async (job) => {
-      const {
-        jobUuid,
-        job_type: jobTypeFromData,
-        type: legacyJobType,
-        storeHash,
-        storeUrl,
-        accessToken,
-        productId,
-        imageId,
-        imageUrl,
-        settings,
-        imageMeta = {},
-      } = job.data;
+const WORKER_NAME = resolveWorkerName();
 
-      const jobType = jobTypeFromData || legacyJobType || "bulk";
-      const maxAttempts = job.opts.attempts || 1;
-      const isLastAttempt = job.attemptsMade + 1 >= maxAttempts;
-      const logContext = jobUuid
-        ? { jobUuid, storeHash, jobType, productId, imageId }
-        : null;
+const workers = [];
+const connections = [];
 
-      const runOptimize = Boolean(settings?.optimize_image_enabled);
-
-      if (jobUuid && runOptimize) {
-        const { error: statusError } = await setJobItemStatus({
-          jobUuid,
-          productId,
-          imageId,
-          status: "optimizing",
-        });
-
-        if (statusError) {
-          console.error("[image-optimization-worker] optimizing status:", statusError);
-          await appendImageLog({
-            jobUuid,
-            storeHash,
-            jobType,
-            imageId,
-            productId,
-            logType: "error",
-            step: "worker",
-            message: "Failed to set job item status to optimizing",
-            meta: { error: statusError },
-          });
-        }
-      }
-
-      const forceReoptimize = Boolean(job.data?.force || job.data?.force_reoptimize);
-      if (!forceReoptimize) {
-        const clientStatus = String(
-          job.data?.optimization_status || job.data?.status || ""
-        ).toLowerCase();
-        const alreadyOptimizedOnClient = ["optimized", "optimizing"].includes(
-          clientStatus
-        );
-        const { skip, reason } = await shouldSkipImageOptimization(
-          storeHash,
-          productId,
-          imageId
-        );
-
-        if (skip || alreadyOptimizedOnClient) {
-          const skipMessage =
-            reason || "Image is already optimized or currently optimizing";
-
-          if (jobUuid) {
-            const { error: recordError } = await recordOptimizationJobImageResult({
-              jobUuid,
-              storeHash,
-              skipped: true,
-              skipReason: skipMessage,
-              imageId,
-              productId,
-              jobType,
-            });
-            if (recordError) {
-              console.error("[image-optimization-worker] skip record:", recordError);
-            }
-          }
-
-          return {
-            skipped: true,
-            reason: skipMessage,
-            image_id: imageId,
-            product_id: productId,
-          };
-        }
-      }
-
-      const resolvedUrl = resolveProductImageUrl(storeUrl, imageUrl);
-      if (!resolvedUrl) {
-        const errMsg =
-          "Invalid image_url: could not resolve a valid storefront image URL";
-
-        if (jobUuid && isLastAttempt) {
-          const { error: recordError } = await recordOptimizationJobImageResult({
-            jobUuid,
-            storeHash,
-            success: false,
-            imageId,
-            productId,
-            errorMessage: errMsg,
-            jobType,
-          });
-
-          if (recordError) {
-            console.error("[image-optimization-worker] record failed:", recordError);
-          }
-        }
-
-        throw new Error(errMsg);
-      }
-
-      let success = false;
-      let resultData = null;
-      let errorMessage = null;
-
-      try {
-        const result = await compressImage({
-          storeHash,
-          storeUrl,
-          accessToken,
-          imageId: String(imageId),
-          productId,
-          imageUrl: resolvedUrl,
-          settings,
-          imageMeta,
-          logContext,
-        });
-
-        if (!result.success) {
-          errorMessage = result.error || "Image optimization failed";
-          if (isLastAttempt) {
-            success = false;
-          } else {
-            throw new Error(errorMessage);
-          }
-        } else {
-          success = true;
-          resultData = result.data;
-        }
-      } catch (err) {
-        errorMessage = err?.message || "Image optimization failed";
-        if (!isLastAttempt) {
-          throw err;
-        }
-        success = false;
-      }
-
-      if (jobUuid && (success || isLastAttempt)) {
-        const compression = resultData?.optimizedImage?.compression;
-        const metadataOnly = Boolean(
-          resultData?.metadataOnly || resultData?.optimizedImage?.metadataOnly
-        );
-        const { error: recordError } = await recordOptimizationJobImageResult({
-          jobUuid,
-          storeHash,
-          success,
-          imageId,
-          productId,
-          errorMessage,
-          jobType,
-          savedBytes: compression?.savedBytes ?? null,
-          savedPercentage: compression?.savedPercent ?? null,
-          metadataOnly,
-        });
-
-        if (recordError) {
-          console.error("[image-optimization-worker] record failed:", recordError);
-          throw new Error(recordError);
-        }
-      }
-
-      if (!success) {
-        throw new Error(errorMessage || "Image optimization failed");
-      }
-
-      return resultData;
-    },
-    {
-      connection,
-      concurrency: appConfig.workers.optimizationConcurrency,
-    }
-  );
-
+function attachWorkerEvents(worker, queueName) {
   worker.on("completed", (job) => {
     console.log("[image-optimization-worker] completed", {
+      queue: queueName,
       jobId: job.id,
       jobUuid: job.data?.jobUuid,
       imageId: job.data?.imageId,
@@ -226,6 +58,7 @@ async function startWorker() {
 
   worker.on("failed", async (job, err) => {
     console.error("[image-optimization-worker] failed", {
+      queue: queueName,
       jobId: job?.id,
       jobUuid: job?.data?.jobUuid,
       imageId: job?.data?.imageId,
@@ -242,24 +75,78 @@ async function startWorker() {
         imageId: data.imageId,
         productId: data.productId,
         logType: "error",
-        step: "worker",
+        step: "worker_failed",
         message: err?.message || "Image optimization worker job failed",
         meta: {
+          seq: 7,
           bull_job_id: job?.id,
           attempts_made: job?.attemptsMade,
+          queue: queueName,
+          source: "bullmq_failed_event",
         },
       });
     }
   });
+}
 
-  console.log("[image-optimization-worker] started", { queue: QUEUE_NAME });
+async function startWorkerForTier(tier) {
+  const queueName = getQueueNameForTier(tier);
+  const connection = createRedisConnection(`bullmq-image-optimization-worker-${tier}`);
+  const concurrency = getWorkerConcurrencyForTier(tier);
+
+  const worker = new Worker(
+    queueName,
+    processImageOptimizationJob,
+    {
+    connection,
+    concurrency,
+  }
+  );
+
+  attachWorkerEvents(worker, queueName);
+  workers.push(worker);
+  connections.push(connection);
+
+  console.log("[image-optimization-worker] started", { queue: queueName, tier, concurrency });
+}
+
+async function startLegacyWorker() {
+  const connection = createRedisConnection("bullmq-image-optimization-worker-legacy");
+  const worker = new Worker(
+    LEGACY_QUEUE_NAME,
+    processImageOptimizationJob,
+    {
+    connection,
+    concurrency: getWorkerConcurrencyForTier("2"),
+  }
+  );
+
+  attachWorkerEvents(worker, LEGACY_QUEUE_NAME);
+  workers.push(worker);
+  connections.push(connection);
+
+  console.log("[image-optimization-worker] started legacy drain", {
+    queue: LEGACY_QUEUE_NAME,
+  });
+}
+
+async function startWorker() {
+  await connectMongo();
+  const tiers = tiersToStart();
+  for (const tier of tiers) {
+    await startWorkerForTier(tier);
+  }
+
+  if (listenLegacy) {
+    await startLegacyWorker();
+  }
 }
 
 async function shutdown(signal) {
   try {
     console.log(`[image-optimization-worker] shutting down (${signal})...`);
-    if (worker) await worker.close();
-    await connection.quit();
+    await Promise.all(workers.map((worker) => worker.close()));
+    await Promise.all(connections.map((connection) => connection.quit()));
     process.exit(0);
   } catch (err) {
     console.error("[image-optimization-worker] shutdown error", err);

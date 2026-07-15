@@ -6,6 +6,7 @@ const { Worker } = require("bullmq");
 const { createRedisConnection } = require("../db/redis");
 const { connectMongo } = require("../db/mongo");
 const { QUEUE_NAME } = require("../queue/categoryImageRestoreQueue");
+const { getJobAttempts } = require("../queue/workerJobOptions");
 const {
   restoreCategoryImageSingle,
   setCategoryJobItemStatus,
@@ -14,6 +15,7 @@ const {
 const {
   appendCategoryImageLog,
 } = require("../modules/categoryImages/utils/categoryActivityLog");
+const WORKER_NAME = "category-image-restore";
 
 const envPath = [
   path.join(process.cwd(), ".env"),
@@ -27,7 +29,6 @@ let worker;
 
 async function startWorker() {
   await connectMongo();
-
   worker = new Worker(
     QUEUE_NAME,
     async (job) => {
@@ -41,7 +42,7 @@ async function startWorker() {
         categoryId,
       } = job.data;
 
-      const maxAttempts = job.opts.attempts || 1;
+      const maxAttempts = job.opts?.attempts || getJobAttempts();
       const isLastAttempt = job.attemptsMade + 1 >= maxAttempts;
 
       // ── Mark item as "restoring" ───────────────────────────────────────────

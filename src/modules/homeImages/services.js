@@ -344,11 +344,6 @@ async function getHomeImagesService({ storeHash, accessToken, storeUrl, channelI
       fetchStorefrontHtmlImages(storeUrl),
     ]);
 
-
-    console.log("marketingBanners", JSON.stringify(marketingBanners, null, 2));
-    console.log("widgetImages", widgetImages.length);
-    console.log("contentPageImages", contentPageImages.length);
-    console.log("storefrontImages", storefrontImages.length);
   const allItems = [...marketingBanners, ...widgetImages, ...contentPageImages, ...storefrontImages];
 
   const errors = allItems.filter((item) => item.error);

@@ -92,9 +92,58 @@ exports.getImageSizesFromUrls = async (items, options = {}) => {
 };
 
 
+function parseTotalBytesFromHeaders(headers, fallbackLength) {
+  const contentRange = headers?.["content-range"];
+  if (contentRange) {
+    const match = String(contentRange).match(/\/(\d+)$/);
+    if (match) {
+      const total = parseInt(match[1], 10);
+      if (Number.isFinite(total) && total > 0) return total;
+    }
+  }
+
+  const contentLength = headers?.["content-length"];
+  if (contentLength) {
+    const total = parseInt(contentLength, 10);
+    if (Number.isFinite(total) && total > 0) return total;
+  }
+
+  return fallbackLength;
+}
+
+async function readImageSizeFromBuffer(buffer, headers) {
+  const meta = await sharp(buffer, { failOn: "none" }).metadata();
+  const bytes = parseTotalBytesFromHeaders(headers, buffer.length);
+
+  return {
+    bytes,
+    width: meta.width ?? null,
+    height: meta.height ?? null,
+    format: meta.format ?? null,
+  };
+}
+
+async function fetchFullImageSizeFromUrl(imageUrl, options = {}) {
+  const timeoutMs = options.timeoutMs ?? config.image.fetchTimeoutMs;
+  const maxBytes = options.maxBytes ?? config.image.maxBytes;
+
+  const response = await axios.get(imageUrl, {
+    responseType: "arraybuffer",
+    timeout: timeoutMs,
+    maxContentLength: maxBytes,
+    maxBodyLength: maxBytes,
+    validateStatus: (status) => status >= 200 && status < 300,
+  });
+
+  const buffer = Buffer.from(response.data);
+  return readImageSizeFromBuffer(buffer, response.headers);
+}
+
 exports.getImageSizeFromUrl = async (imageUrl, options = {}) => {
   const timeoutMs = options.timeoutMs ?? config.image.fetchTimeoutMs;
   const maxBytes = options.maxBytes ?? config.image.maxBytes;
+  const rangeBytes =
+    options.rangeBytes ?? config.image.sizeFetchRangeBytes ?? 65_535;
 
   if (!imageUrl || typeof imageUrl !== "string") {
     return {
@@ -107,31 +156,37 @@ exports.getImageSizeFromUrl = async (imageUrl, options = {}) => {
   }
 
   try {
+    const cappedRange = Math.min(rangeBytes, maxBytes - 1);
     const response = await axios.get(imageUrl, {
       responseType: "arraybuffer",
       timeout: timeoutMs,
-      maxContentLength: maxBytes,
-      maxBodyLength: maxBytes,
-      validateStatus: (status) => status >= 200 && status < 300,
+      headers: { Range: `bytes=0-${cappedRange}` },
+      maxContentLength: Math.min(maxBytes, cappedRange + 1),
+      maxBodyLength: Math.min(maxBytes, cappedRange + 1),
+      validateStatus: (status) =>
+        (status >= 200 && status < 300) || status === 206,
     });
 
     const buffer = Buffer.from(response.data);
-    const meta = await sharp(buffer, { failOn: "none" }).metadata();
+    const partial = await readImageSizeFromBuffer(buffer, response.headers);
 
-    return {
-      bytes: buffer.length,
-      width: meta.width ?? null,
-      height: meta.height ?? null,
-      format: meta.format ?? null,
-    };
+    if (partial.width && partial.height) {
+      return partial;
+    }
+
+    return fetchFullImageSizeFromUrl(imageUrl, options);
   } catch (err) {
-    return {
-      error: err.message || "Failed to fetch image size",
-      bytes: null,
-      width: null,
-      height: null,
-      format: null,
-    };
+    try {
+      return await fetchFullImageSizeFromUrl(imageUrl, options);
+    } catch (fallbackErr) {
+      return {
+        error: fallbackErr.message || err.message || "Failed to fetch image size",
+        bytes: null,
+        width: null,
+        height: null,
+        format: null,
+      };
+    }
   }
 };
 

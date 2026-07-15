@@ -14,6 +14,21 @@ const StoreImageStatSchema = new mongoose.Schema(
       default: 0,
     },
 
+    pending_images: {
+      type: Number,
+      default: 0,
+    },
+
+    total_catalog_images: {
+      type: Number,
+      default: 0,
+    },
+
+    last_catalog_sync_at: {
+      type: Date,
+      default: null,
+    },
+
     filename_updated_images: {
       type: Number,
       default: 0,

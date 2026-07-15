@@ -8,20 +8,33 @@
     "start": "node src/server.js",
     "dev": "nodemon --config nodemon.json src/server.js",
     "worker:image-optimization": "node src/workers/imageOptimizationWorker.js",
+    "worker:image-optimization-heavy": "cross-env IMAGE_OPTIMIZATION_QUEUE_TIER=heavy node src/workers/imageOptimizationWorker.js",
+    "worker:optimization-heavy-supervisor": "node src/workers/optimizationHeavySupervisor.js",
+    "worker:image-optimization-2": "cross-env IMAGE_OPTIMIZATION_QUEUE_TIER=2 node src/workers/imageOptimizationWorker.js",
+    "worker:image-optimization-3": "cross-env IMAGE_OPTIMIZATION_QUEUE_TIER=3 node src/workers/imageOptimizationWorker.js",
+    "worker:image-optimization-legacy": "cross-env IMAGE_OPTIMIZATION_LISTEN_LEGACY=true node src/workers/imageOptimizationWorker.js",
     "worker:image-restore": "node src/workers/imageRestoreWorker.js",
+    "worker:image-restore-heavy": "cross-env IMAGE_RESTORE_QUEUE_TIER=heavy node src/workers/imageRestoreWorker.js",
+    "worker:restore-heavy-supervisor": "node src/workers/restoreHeavySupervisor.js",
+    "worker:image-restore-2": "cross-env IMAGE_RESTORE_QUEUE_TIER=2 node src/workers/imageRestoreWorker.js",
+    "worker:image-restore-3": "cross-env IMAGE_RESTORE_QUEUE_TIER=3 node src/workers/imageRestoreWorker.js",
+    "worker:image-restore-legacy": "cross-env IMAGE_RESTORE_LISTEN_LEGACY=true node src/workers/imageRestoreWorker.js",
     "worker:category-image": "node src/workers/categoryImageWorker.js",
     "worker:category-image-restore": "node src/workers/categoryImageRestoreWorker.js",
     "worker:catalog-fetch": "node src/workers/catalogFetchWorker.js",
-    "worker:home-image": "node src/workers/homeImageWorker.js",
     "worker:brand-image": "node src/workers/brandImageWorker.js",
     "worker:brand-image-restore": "node src/workers/brandImageRestoreWorker.js",
-    "workers:windows": "start \"image-optimization\" cmd /k npm run worker:image-optimization && start \"image-restore\" cmd /k npm run worker:image-restore && start \"category-image\" cmd /k npm run worker:category-image && start \"category-image-restore\" cmd /k npm run worker:category-image-restore && start \"catalog-fetch\" cmd /k npm run worker:catalog-fetch && start \"home-image\" cmd /k npm run worker:home-image && start \"brand-image\" cmd /k npm run worker:brand-image && start \"brand-image-restore\" cmd /k npm run worker:brand-image-restore"
+    "workers:clear-locks": "node scripts/clearHeavySupervisorLocks.js",
+    "cleanup:storage": "node scripts/cleanupOldStorage.js",
+    "dev:local": "echo Run in separate terminals: npm run dev | npm run workers:windows",
+    "workers:windows": "start \"optimization-heavy-supervisor\" cmd /k npm run worker:optimization-heavy-supervisor && start \"restore-heavy-supervisor\" cmd /k npm run worker:restore-heavy-supervisor && start \"image-optimization-2\" cmd /k npm run worker:image-optimization-2 && start \"image-optimization-3\" cmd /k npm run worker:image-optimization-3 && start \"image-restore-2\" cmd /k npm run worker:image-restore-2 && start \"image-restore-3\" cmd /k npm run worker:image-restore-3 && start \"category-image\" cmd /k npm run worker:category-image && start \"category-image-restore\" cmd /k npm run worker:category-image-restore && start \"catalog-fetch\" cmd /k npm run worker:catalog-fetch && start \"brand-image\" cmd /k npm run worker:brand-image && start \"brand-image-restore\" cmd /k npm run worker:brand-image-restore"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "devDependencies": {
+    "cross-env": "^10.1.0",
     "nodemon": "^3.1.14"
   },
   "dependencies": {
@@ -34,6 +47,8 @@
     "ioredis": "^5.10.1",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.3.3",
-    "sharp": "^0.34.5"
+    "nodemailer": "^6.10.1",
+    "sharp": "^0.34.5",
+    "socket.io": "^4.8.3"
   }
 }

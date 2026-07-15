@@ -17,8 +17,11 @@ const {
   standaloneBrandJobUuid,
 } = require("./utils/brandActivityLog");
 const config = require("../../config");
+const { adjustPendingImages } = require("../../utils/storePendingImages");
 
 const SKIP_BRAND_STATUSES = new Set(["optimized", "optimizing"]);
+const SKIP_PENDING_BRAND_STATUSES = new Set(["optimized", "optimizing", "pending"]);
+const RESTORE_SUCCESS_STATUSES = new Set(["restored"]);
 
 const bcJsonHeaders = (accessToken) => ({
   "X-Auth-Token": accessToken,
@@ -264,6 +267,8 @@ exports.optimizeBrandImageSingle = async ({
     };
   }
 
+  await registerPendingBrandImages(storeHash, [resolvedBrandId]);
+
   const result = await compressBrandImage({
     storeHash,
     accessToken,
@@ -273,6 +278,9 @@ exports.optimizeBrandImageSingle = async ({
     settings,
     force,
   });
+
+  // Single optimize has no BrandJobItem record step — consume pending here.
+  await adjustPendingImages(storeHash, -1);
 
   if (!result.success) {
     return { success: false, status: 500, message: result.error || "Brand image optimization failed" };
@@ -531,6 +539,72 @@ exports.createBrandBulkJob = async ({
 };
 
 /**
+ * Mark brand images pending for store dashboard stats.
+ * Skips already optimized, optimizing, or already-pending brands.
+ */
+async function registerPendingBrandImages(storeHash, brandIds = []) {
+  if (!storeHash || !brandIds.length) return { registered: 0, error: null };
+
+  const normalized = [];
+  const seen = new Set();
+
+  for (const rawId of brandIds) {
+    const brandId = Number(rawId);
+    if (!Number.isFinite(brandId) || brandId <= 0 || seen.has(brandId)) continue;
+    seen.add(brandId);
+    normalized.push(brandId);
+  }
+
+  if (!normalized.length) return { registered: 0, error: null };
+
+  try {
+    const existingRows = await BrandImageStatus.find({
+      store_hash: storeHash,
+      brand_id: { $in: normalized },
+    })
+      .select({ brand_id: 1, status: 1 })
+      .lean();
+
+    const skipIds = new Set();
+    for (const row of existingRows) {
+      if (SKIP_PENDING_BRAND_STATUSES.has(row.status)) {
+        skipIds.add(Number(row.brand_id));
+      }
+    }
+
+    const toRegister = normalized.filter((id) => !skipIds.has(id));
+    if (!toRegister.length) return { registered: 0, error: null };
+
+    const bulkOps = toRegister.map((brandId) => ({
+      updateOne: {
+        filter: { store_hash: storeHash, brand_id: brandId },
+        update: {
+          $set: { status: "pending", image_update_status: "pending" },
+          $setOnInsert: { store_hash: storeHash, brand_id: brandId },
+        },
+        upsert: true,
+      },
+    }));
+
+    const bulkResult = await BrandImageStatus.bulkWrite(bulkOps, { ordered: false });
+    const registered =
+      (Number(bulkResult.upsertedCount) || 0) +
+      (Number(bulkResult.modifiedCount) || 0);
+
+    if (registered > 0) {
+      await adjustPendingImages(storeHash, registered);
+    }
+
+    return { registered, error: null };
+  } catch (err) {
+    console.error("[registerPendingBrandImages]", err.message);
+    return { registered: 0, error: err.message };
+  }
+}
+
+exports.registerPendingBrandImages = registerPendingBrandImages;
+
+/**
  * Mark a single BrandJobItem as "optimizing" when the worker picks it up.
  */
 exports.setBrandJobItemStatus = async ({
@@ -586,6 +660,7 @@ exports.setBrandJobItemStatus = async ({
 exports.recordBrandJobItemResult = async ({
   jobUuid,
   brandId,
+  storeHash: storeHashHint = null,
   success,
   skipped = false,
   skipReason = null,
@@ -649,6 +724,28 @@ exports.recordBrandJobItemResult = async ({
           { $set: { status: "completed", completed_at: new Date() } }
         );
       }
+    }
+
+    const storeHash = storeHashHint || updatedJob?.store_hash || null;
+    // Consume one dashboard pending slot when a queued optimize item finishes
+    // (success or fail). Skips and restores do not touch pending.
+    if (
+      !skipped &&
+      !RESTORE_SUCCESS_STATUSES.has(String(successStatus || "").toLowerCase()) &&
+      storeHash
+    ) {
+      const pendingResult = await adjustPendingImages(storeHash, -1);
+      if (pendingResult.error) {
+        console.error(
+          "[recordBrandJobItemResult] pending decrement failed:",
+          pendingResult.error
+        );
+      }
+    } else if (!skipped && !storeHash) {
+      console.error(
+        "[recordBrandJobItemResult] missing storeHash — pending_images not decremented",
+        { jobUuid, brandId }
+      );
     }
 
     return { error: null };

@@ -69,7 +69,6 @@ exports.downloadImage = async ({
    writer.on("finish", resolve);
    writer.on("error", reject);
  });
- console.log("Image downloaded successfully", fileName , filePath, originalImagesDir, optimizedImagesDir);
 
  // Return saved file path
  return {

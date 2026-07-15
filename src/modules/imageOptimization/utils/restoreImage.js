@@ -13,6 +13,9 @@ const {
   uploadProductImage,
   deleteProductImage,
   updateProductImageMetadata,
+  fetchProductImageById,
+  normalizeUploadDescription,
+  syncProductImageDescription,
 } = require("./bigCommerceProductImage");
 const { get } = require("../../../utils/axiosUtils");
 const { appendImageLog, resolveJobUuid } = require("./imageActivityLog");
@@ -171,11 +174,8 @@ async function validateRestoreEligibility({
 }
 
 function resolveRestoreUploadMeta({ overrides = {}, imageOldData, originalPath }) {
-  const description =
-    (imageOldData?.altText && String(imageOldData.altText).trim()) ||
-    (overrides.altText && String(overrides.altText).trim()) ||
-    (overrides.alt_text && String(overrides.alt_text).trim()) ||
-    "Restored original image";
+  // Restore only the original alt text backup — never generated/template alt text.
+  const description = normalizeUploadDescription(imageOldData?.altText ?? "");
 
   const uploadFileName =
     (imageOldData?.imageName && String(imageOldData.imageName).trim()) ||
@@ -184,6 +184,49 @@ function resolveRestoreUploadMeta({ overrides = {}, imageOldData, originalPath }
     path.basename(originalPath);
 
   return { description, uploadFileName };
+}
+
+function parseThumbnailFlag(value) {
+  if (value == null || value === "") return null;
+  if (typeof value === "boolean") return value;
+  return ["true", "1", "yes"].includes(String(value).trim().toLowerCase());
+}
+
+function resolveRestorePlacement(overrides = {}) {
+  const placement = overrides.placement || {};
+  const sortOrderRaw =
+    placement.sortOrder ?? overrides.sort_order ?? overrides.sortOrder;
+  const isThumbnailRaw =
+    placement.isThumbnail ??
+    overrides.is_thumbnail ??
+    overrides.is_thumnail ??
+    overrides.isThumbnail;
+
+  let sortOrder = null;
+  if (sortOrderRaw != null && sortOrderRaw !== "") {
+    const n = Number(sortOrderRaw);
+    if (!Number.isNaN(n)) sortOrder = n;
+  }
+
+  return {
+    sortOrder,
+    isThumbnail: parseThumbnailFlag(isThumbnailRaw),
+  };
+}
+
+async function confirmBigCommerceThumbnail({
+  storeHash,
+  productId,
+  imageId,
+  accessToken,
+}) {
+  const image = await fetchProductImageById({
+    storeHash,
+    productId,
+    imageId,
+    accessToken,
+  });
+  return Boolean(image?.is_thumbnail);
 }
 
 /**
@@ -240,9 +283,7 @@ async function restoreSingleImage({
     originalPath,
   });
 
-  const placement = overrides.placement || {};
-  let sortOrder = placement.sortOrder;
-  let isThumbnail = placement.isThumbnail;
+  let { sortOrder, isThumbnail } = resolveRestorePlacement(overrides);
 
   if (sortOrder == null || isThumbnail == null) {
     try {
@@ -284,9 +325,7 @@ async function restoreSingleImage({
     sortOrder = 1;
   }
 
-  if (isThumbnail == null) {
-    isThumbnail = false;
-  }
+  const shouldKeepThumbnail = isThumbnail === true;
 
   const fileBuf = await fs.readFile(originalPath);
 
@@ -300,7 +339,8 @@ async function restoreSingleImage({
       fileName: uploadFileName,
       description,
       sortOrder,
-      isThumbnail,
+      isThumbnail: false,
+      forceEmptyDescription: !description,
     });
   } catch (uploadErr) {
     const uploadErrMsg =
@@ -346,33 +386,129 @@ async function restoreSingleImage({
   }
 
   const restoredImageId = restoredImage.id;
-  if (description && String(description).trim()) {
-    const metadataResult = await updateProductImageMetadata({
-      storeHash,
-      productId,
-      imageId: restoredImageId,
-      accessToken,
-      description: String(description).trim(),
-      sortOrder,
-      isThumbnail,
-    });
+  let thumbnailConfirmed = !shouldKeepThumbnail;
+  let oldOptimizedImageDeleted = false;
 
-    if (metadataResult?.error) {
+  if (shouldKeepThumbnail) {
+    const imageFile =
+      restoredImage.image_file != null
+        ? String(restoredImage.image_file).trim()
+        : "";
+
+    const applyThumbnail = async () =>
+      updateProductImageMetadata({
+        storeHash,
+        productId,
+        imageId: restoredImageId,
+        accessToken,
+        ...(imageFile ? { imageFile } : {}),
+        sortOrder,
+        isThumbnail: true,
+      });
+
+    let thumbUpdate = await applyThumbnail();
+    if (thumbUpdate?.error) {
       await logRestoreActivity(
         effectiveLogContext,
         { storeHash, productId, imageId },
         {
           logType: "warning",
           step: "metadata",
-          message:
-            "Restored image uploaded but BigCommerce alt text metadata update failed",
+          message: "Failed to set restored image as BigCommerce thumbnail",
           meta: {
             restored_image_id: restoredImageId,
-            error: metadataResult.error,
+            error: thumbUpdate.error,
           },
         }
       );
     }
+
+    thumbnailConfirmed = await confirmBigCommerceThumbnail({
+      storeHash,
+      productId,
+      imageId: restoredImageId,
+      accessToken,
+    });
+
+    if (!thumbnailConfirmed) {
+      try {
+        await deleteProductImage({
+          storeHash,
+          productId,
+          imageId,
+          accessToken,
+        });
+        oldOptimizedImageDeleted = true;
+
+        thumbUpdate = await applyThumbnail();
+        if (!thumbUpdate?.error) {
+          thumbnailConfirmed = await confirmBigCommerceThumbnail({
+            storeHash,
+            productId,
+            imageId: restoredImageId,
+            accessToken,
+          });
+        }
+      } catch (deleteErr) {
+        await logRestoreActivity(
+          effectiveLogContext,
+          { storeHash, productId, imageId },
+          {
+            logType: "warning",
+            step: "bc_delete",
+            message:
+              "Could not remove previous optimized thumbnail before re-applying thumbnail on restored image",
+            meta: {
+              removed_image_id: imageId,
+              restored_image_id: restoredImageId,
+              error: deleteErr?.message || String(deleteErr),
+            },
+          }
+        );
+      }
+    }
+
+    if (!thumbnailConfirmed) {
+      await logRestoreActivity(
+        effectiveLogContext,
+        { storeHash, productId, imageId },
+        {
+          logType: "error",
+          step: "metadata",
+          message:
+            "Restored image uploaded but BigCommerce thumbnail was not confirmed",
+          meta: { restored_image_id: restoredImageId },
+        }
+      );
+    }
+  }
+
+  const syncResult = await syncProductImageDescription({
+    storeHash,
+    productId,
+    imageId: restoredImageId,
+    accessToken,
+    description,
+    sortOrder,
+    isThumbnail: shouldKeepThumbnail ? true : isThumbnail,
+  });
+
+  if (!syncResult.ok) {
+    await logRestoreActivity(
+      effectiveLogContext,
+      { storeHash, productId, imageId },
+      {
+        logType: "warning",
+        step: "metadata",
+        message: description
+          ? "Restored image uploaded but BigCommerce alt text metadata sync failed"
+          : "Restored image uploaded but BigCommerce alt text clear failed",
+        meta: {
+          restored_image_id: restoredImageId,
+          error: syncResult.error,
+        },
+      }
+    );
   }
 
   await logRestoreActivity(
@@ -392,48 +528,51 @@ async function restoreSingleImage({
     restoredImage.url_standard || null
   );
 
-  try {
-    await deleteProductImage({
-      storeHash,
-      productId,
-      imageId,
-      accessToken,
-    });
-    await logRestoreActivity(
-      effectiveLogContext,
-      { storeHash, productId, imageId },
-      {
-        logType: "info",
-        step: "bc_delete",
-        message: "Removed optimized BigCommerce image after restore",
-        meta: {
-          removed_image_id: imageId,
-          restored_image_id: restoredImageId,
-        },
-      }
-    );
-  } catch (deleteErr) {
-    const deleteDetail =
-      deleteErr?.response?.data || deleteErr.message || String(deleteErr);
-    console.error(
-      "[restoreSingleImage] BC delete optimized image:",
-      deleteDetail
-    );
-    await logRestoreActivity(
-      effectiveLogContext,
-      { storeHash, productId, imageId },
-      {
-        logType: "warning",
-        step: "bc_delete",
-        message:
-          "Failed to delete optimized BigCommerce image after restore (restore continued)",
-        meta: {
-          removed_image_id: imageId,
-          restored_image_id: restoredImageId,
-          error: deleteDetail,
-        },
-      }
-    );
+  if (thumbnailConfirmed && !oldOptimizedImageDeleted) {
+    try {
+      await deleteProductImage({
+        storeHash,
+        productId,
+        imageId,
+        accessToken,
+      });
+      await logRestoreActivity(
+        effectiveLogContext,
+        { storeHash, productId, imageId },
+        {
+          logType: "info",
+          step: "bc_delete",
+          message: "Removed optimized BigCommerce image after restore",
+          meta: {
+            removed_image_id: imageId,
+            restored_image_id: restoredImageId,
+            kept_thumbnail: shouldKeepThumbnail,
+          },
+        }
+      );
+    } catch (deleteErr) {
+      const deleteDetail =
+        deleteErr?.response?.data || deleteErr.message || String(deleteErr);
+      console.error(
+        "[restoreSingleImage] BC delete optimized image:",
+        deleteDetail
+      );
+      await logRestoreActivity(
+        effectiveLogContext,
+        { storeHash, productId, imageId },
+        {
+          logType: "warning",
+          step: "bc_delete",
+          message:
+            "Failed to delete optimized BigCommerce image after restore (restore continued)",
+          meta: {
+            removed_image_id: imageId,
+            restored_image_id: restoredImageId,
+            error: deleteDetail,
+          },
+        }
+      );
+    }
   }
 
   const optimizedPath = imageOptimization?.optimized_image_path || null;
@@ -444,6 +583,8 @@ async function restoreSingleImage({
     Number(imageOldData?.saved_bytes) ||
     (origSize > 0 ? Math.max(0, origSize - optSize) : 0);
 
+  // Restore must not change optimized_images / pending_images.
+  // pending_images is only for images waiting to be optimized.
   const cleanupTasks = [
     ImageOptimization.deleteOne(lookup),
     ImageOldData.deleteOne(lookup),
@@ -461,7 +602,6 @@ async function restoreSingleImage({
         { store_hash: storeHash },
         {
           $inc: {
-            optimized_images: -1,
             total_original_size: -origSize,
             total_optimized_size: -optSize,
             total_saved_bytes: -savedBytes,

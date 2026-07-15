@@ -46,6 +46,12 @@ const ImageJobItemSchema = new mongoose.Schema(
       default: null,
     },
 
+    batch_index: {
+      type: Number,
+      default: null,
+      index: true,
+    },
+
     status: {
       type: String,
       enum: IMAGE_JOB_ITEM_STATUSES,
@@ -95,5 +101,7 @@ ImageJobItemSchema.index(
   { job_uuid: 1, product_id: 1, image_id: 1 },
   { unique: true }
 );
+
+ImageJobItemSchema.index({ job_uuid: 1, batch_index: 1 });
 
 module.exports = mongoose.model("ImageJobItem", ImageJobItemSchema);

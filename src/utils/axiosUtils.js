@@ -1,11 +1,21 @@
 const axios = require('axios');
+const http = require('http');
+const https = require('https');
 const config = require('../config');
+
+// Reuse TCP/TLS connections across sequential BigCommerce calls (upload,
+// metadata update, delete, verify, etc. all hit the same host back-to-back)
+// instead of paying a fresh handshake for every request.
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50 });
 
 const instance = axios.create({
   timeout: config.http.axiosTimeoutMs,
   headers: {
     'Content-Type': 'application/json',
   },
+  httpAgent,
+  httpsAgent,
 });
 
 instance.interceptors.response.use(
@@ -100,6 +110,8 @@ async function postFormData(url, form, headers = {}) {
     },
     maxBodyLength: Infinity,
     maxContentLength: Infinity,
+    httpAgent,
+    httpsAgent,
   });
   return response.data;
 }

@@ -55,6 +55,18 @@ const ImageOptimizationJobSchema = new mongoose.Schema(
       default: 0,
     },
 
+    /** Total MongoDB batches for this job (staggered Redis dispatch). */
+    total_batches: {
+      type: Number,
+      default: 0,
+    },
+
+    /** Last batch index dispatched to Redis (-1 = none yet). */
+    last_dispatched_batch_index: {
+      type: Number,
+      default: -1,
+    },
+
     status: {
       type: String,
       enum: IMAGE_JOB_STATUSES,

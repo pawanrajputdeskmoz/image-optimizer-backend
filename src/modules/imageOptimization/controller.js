@@ -1,5 +1,4 @@
 const {
-  User,
   ImageOptimization,
   ImageJobItem,
   ImageStatus,
@@ -8,9 +7,12 @@ const {
 const crypto = require("node:crypto");
 const path = require("node:path");
 const { get } = require("../../utils/axiosUtils");
-const { imageOptimizationQueue } = require("../../queue/imageOptimizationQueue");
-const { imageRestoreQueue } = require("../../queue/imageRestoreQueue");
+const { fetchCatalogProducts } = require("../../utils/bcCatalogRateLimit");
+const { addOptimizationJob, pickOptimizationQueueTier, TIER_HEAVY } = require("../../queue/imageOptimizationQueues");
+const { signalHeavyWorkerNeeded } = require("../../utils/elasticHeavyOptimizationWorker");
+const { addRestoreJob, pickRestoreQueueTier } = require("../../queue/imageRestoreQueues");
 const { catalogFetchQueue } = require("../../queue/catalogFetchQueue");
+const { coordinatorWorkerJobOptions } = require("../../queue/workerJobOptions");
 const { restoreSingleImage } = require("./utils/restoreImage");
 const {
   normalizePagination,
@@ -36,7 +38,16 @@ const {
   appendImageLog,
   getAlreadyOptimizedImageIdSet,
   shouldSkipImageOptimization,
+  skipPendingJobItemsForImage,
   updateJobAfterCatalogFetch,
+  getOptimizationBatchSize,
+  getOptimizationBatchCount,
+  queueOptimizationBatchJobs,
+  createRestoreJobPlaceholder,
+  processBulkRestoreFromStore,
+  processRestoreItemsInChunks,
+  registerPendingProductImages,
+  getStoreDashboardStats: loadStoreDashboardStats,
 } = require("./services");
 const { getImageSizesFromUrls } = require("../../utils/sharpFunction");
 const { resolveProductImageUrl } = require("./utils/urls");
@@ -46,8 +57,21 @@ const {
   normalizeImageFile,
   resolveChannelSiteUrl,
 } = require("../../utils/channelContext");
-const { performance } = require("perf_hooks");
 const config = require("../../config");
+const {
+  replyIfBulkOptimizationBlocked,
+  buildBulkQueuedMessage,
+  isFullBulkOptimizationJobType,
+} = require("../../utils/bulkOptimizationGuard");
+const {
+  replyIfBulkRestoreBlocked,
+  buildBulkRestoreQueuedMessage,
+} = require("../../utils/bulkRestoreGuard");
+const {
+  canOptimizeImages,
+  buildPlanLimitApiBody,
+} = require("../plans/service");
+const { adjustPendingImages } = require("../../utils/storePendingImages");
 
 /** Run an array of async tasks in sequential batches to avoid memory / Redis pressure. */
 async function batchAsync(items, batchSize, asyncFn) {
@@ -67,8 +91,6 @@ async function batchAsync(items, batchSize, asyncFn) {
 
 // --- Catalog ---
 exports.fetchAllProducts = async (req, reply) => {
-  const apiStart = performance.now();
-
   try {
     /**
      * ------------------------------------------------
@@ -97,27 +119,13 @@ exports.fetchAllProducts = async (req, reply) => {
 
     const { page, limit } = normalizePagination(body);
 
-    const query = req.query || {};
     const searchKeyword =
-      typeof query.search === "string"
-        ? query.search.trim()
-        : ""
+      typeof body.search === "string"
+        ? body.search.trim()
+        : "";
 
-    const user = await User.findOne(
-      { store_hash: storeHash },
-      { storeUrl: 1, _id: 0 }
-    ).lean();
-
-    if (!user) {
-      return reply.status(404).send({
-        success: false,
-        message:
-          "Store is not installed. User not found for this store_hash",
-      });
-    }
-
-    const accessToken = req.accessToken || req.currentUser?.access_token || null
-    const storeUrl = user.storeUrl || null;
+    const accessToken = req.accessToken || req.currentUser?.access_token || null;
+    const storeUrl = req.currentUser?.storeUrl || null;
 
     if (
       typeof accessToken !== "string" ||
@@ -156,31 +164,21 @@ exports.fetchAllProducts = async (req, reply) => {
     };
     const bcConfig = { timeout: config.api.bigCommerceTimeoutMs };
 
-    let imageBaseUrl = storeUrl;
-
-    imageBaseUrl = await resolveChannelSiteUrl(
-      storeHash,
-      channelId,
-      accessToken,
-      storeUrl
-    );
-
-    const bcStart = performance.now();
-
-    const response = await get(
-      `https://api.bigcommerce.com/stores/${storeHash}/v3/catalog/products?${params.toString()}`,
-      bcHeaders,
-      bcConfig
-    );
-
-    const bcEnd = performance.now();
-
-    console.log(
-      `[BigCommerce API] ${(
-        bcEnd - bcStart
-      ).toFixed(2)} ms`
-    );
-
+    const [response, imageBaseUrl] = await Promise.all([
+      fetchCatalogProducts(
+        get,
+        storeHash,
+        params,
+        bcHeaders,
+        bcConfig
+      ),
+      resolveChannelSiteUrl(
+        storeHash,
+        channelId,
+        accessToken,
+        storeUrl
+      ),
+    ]);
 
     const products = Array.isArray(response?.data)
       ? response.data
@@ -222,43 +220,7 @@ exports.fetchAllProducts = async (req, reply) => {
 
     /**
      * ------------------------------------------------
-     * 8. Fetch Image Statuses
-     * ------------------------------------------------
-     */
-
-    const statusByImageId = Object.create(null);
-
-    if (imageIds.length > 0) {
-      const imageStatusRows = await ImageStatus.find(
-        {
-          store_hash: storeHash,
-          image_id: { $in: imageIds },
-        },
-        {
-          image_id: 1,
-          status: 1,
-          image_update_status: 1,
-          _id: 0,
-        }
-      ).lean();
-
-      for (
-        let i = 0;
-        i < imageStatusRows.length;
-        i++
-      ) {
-        const row = imageStatusRows[i];
-
-        statusByImageId[row.image_id] = {
-          optimization_status: row.status,
-          image_update_status: row.image_update_status || "pending",
-        };
-      }
-    }
-
-    /**
-     * ------------------------------------------------
-     * 8b. Resolve image sizes via sharp (from live URLs)
+     * 8. Build image URL list for size fetch
      * ------------------------------------------------
      */
 
@@ -282,20 +244,88 @@ exports.fetchAllProducts = async (req, reply) => {
       }
     }
 
-    const sizeFetchStart = performance.now();
-    const sizeByImageId =
-      imageUrlItems.length > 0
-        ? await getImageSizesFromUrls(imageUrlItems, {
-          concurrency: config.image.sizeFetchConcurrency,
-        })
-        : Object.create(null);
-    const sizeFetchEnd = performance.now();
+    /**
+     * ------------------------------------------------
+     * 9. Fetch image statuses + sizes in parallel
+     * ------------------------------------------------
+     */
 
-    console.log(
-      `[fetchAllProducts] Image size fetch: ${imageUrlItems.length} images in ${(
-        sizeFetchEnd - sizeFetchStart
-      ).toFixed(2)} ms`
-    );
+    const statusByImageId = Object.create(null);
+    const sizeByImageId = Object.create(null);
+
+    const [imageStatusRows, oldDataRows] = await Promise.all([
+      imageIds.length > 0
+        ? ImageStatus.find(
+            {
+              store_hash: storeHash,
+              image_id: { $in: imageIds },
+            },
+            {
+              image_id: 1,
+              status: 1,
+              image_update_status: 1,
+              _id: 0,
+            }
+          ).lean()
+        : Promise.resolve([]),
+      imageIds.length > 0
+        ? ImageOldData.find(
+            {
+              store_hash: storeHash,
+              image_id: { $in: imageIds },
+            },
+            {
+              image_id: 1,
+              original: 1,
+              optimized: 1,
+              _id: 0,
+            }
+          ).lean()
+        : Promise.resolve([]),
+    ]);
+
+    for (let i = 0; i < imageStatusRows.length; i++) {
+      const row = imageStatusRows[i];
+
+      statusByImageId[row.image_id] = {
+        optimization_status: row.status,
+        image_update_status: row.image_update_status || "pending",
+      };
+    }
+
+    for (let i = 0; i < oldDataRows.length; i++) {
+      const row = oldDataRows[i];
+      const source =
+        row.original?.size > 0
+          ? row.original
+          : row.optimized?.size > 0
+            ? row.optimized
+            : null;
+
+      if (!source) continue;
+
+      sizeByImageId[row.image_id] = {
+        bytes: source.size ?? null,
+        width: source.width ?? null,
+        height: source.height ?? null,
+        format: source.format ?? null,
+      };
+    }
+
+    const itemsNeedingSizeFetch = imageUrlItems.filter((item) => {
+      const cached = sizeByImageId[item.imageId];
+      return !cached?.bytes || !cached?.width || !cached?.height;
+    });
+
+    if (itemsNeedingSizeFetch.length > 0) {
+      const fetchedSizes = await getImageSizesFromUrls(itemsNeedingSizeFetch, {
+        concurrency: config.image.sizeFetchConcurrency,
+      });
+
+      for (const imageId of Object.keys(fetchedSizes)) {
+        sizeByImageId[imageId] = fetchedSizes[imageId];
+      }
+    }
 
     /**
      * ------------------------------------------------
@@ -372,20 +402,6 @@ exports.fetchAllProducts = async (req, reply) => {
 
     /**
      * ------------------------------------------------
-     * 10. Total API Timing
-     * ------------------------------------------------
-     */
-
-    const apiEnd = performance.now();
-
-    console.log(
-      `[fetchAllProducts] Total API Time: ${(
-        apiEnd - apiStart
-      ).toFixed(2)} ms`
-    );
-
-    /**
-     * ------------------------------------------------
      * 11. Send Response
      * ------------------------------------------------
      */
@@ -408,6 +424,32 @@ exports.fetchAllProducts = async (req, reply) => {
     return reply
       .status(bcError.status)
       .send(bcError.body);
+  }
+};
+
+exports.getStoreDashboardStats = async (req, reply) => {
+  try {
+    const storeHash = req.storeHash;
+    const { error, data } = await loadStoreDashboardStats(storeHash);
+
+    if (error) {
+      return reply.status(500).send({
+        success: false,
+        message: error,
+      });
+    }
+
+    return reply.status(200).send({
+      success: true,
+      message: "Store dashboard stats",
+      data,
+    });
+  } catch (err) {
+    console.error("[getStoreDashboardStats]", err);
+    return reply.status(500).send({
+      success: false,
+      message: err.message || "Failed to load store stats",
+    });
   }
 };
 
@@ -463,6 +505,8 @@ exports.getPreviewImgData = async (req, reply) => {
           image_id: 1,
           imageName: 1,
           altText: 1,
+          newImageName: 1,
+          newAltText: 1,
           original_image_path: 1,
           original: 1,
           optimized: 1,
@@ -487,23 +531,63 @@ exports.getPreviewImgData = async (req, reply) => {
       null;
     const optimizedPath = imageOptimization?.optimized_image_path || null;
 
+    const oldImageMeta = imageOldData?.original || {};
+    const newImageMeta = imageOldData?.optimized || {};
+    const oldName = imageOldData?.imageName || "";
+    const oldAltText = imageOldData?.altText || "";
+    const newName = imageOldData?.newImageName || oldName;
+    const newAltText = imageOldData?.newAltText || oldAltText;
+
     return reply.status(200).send({
       success: true,
       data: {
         image_id: imageId,
         product_id: imageOptimization?.product_id ?? imageOldData?.product_id ?? productId,
-        oldData: imageOldData
-          ? {
-              imageName: imageOldData.imageName || "",
-              altText: imageOldData.altText || "",
-              original: imageOldData.original || { size: null },
-              optimized: imageOldData.optimized || { size: null },
-            }
-          : null,
+        old: {
+          name: oldName,
+          alt_text: oldAltText,
+          size: oldImageMeta.size ?? null,
+          width: oldImageMeta.width ?? null,
+          height: oldImageMeta.height ?? null,
+          format: oldImageMeta.format ?? null,
+          file_path: originalPath,
+        },
+        new: {
+          name: newName,
+          alt_text: newAltText,
+          size: newImageMeta.size ?? null,
+          width: newImageMeta.width ?? null,
+          height: newImageMeta.height ?? null,
+          format: newImageMeta.format ?? null,
+          file_path: optimizedPath,
+        },
+        comparison: {
+          name: { old: oldName, new: newName },
+          alt_text: { old: oldAltText, new: newAltText },
+          size: {
+            old: oldImageMeta.size ?? null,
+            new: newImageMeta.size ?? null,
+            saved_bytes: imageOldData?.saved_bytes ?? null,
+            saved_percentage: imageOldData?.saved_percentage ?? null,
+          },
+        },
+        saved_bytes: imageOldData?.saved_bytes ?? null,
+        saved_percentage: imageOldData?.saved_percentage ?? null,
         files: {
           original: originalPath,
           optimized: optimizedPath,
         },
+        // backward-compatible alias
+        oldData: imageOldData
+          ? {
+              imageName: oldName,
+              altText: oldAltText,
+              newImageName: newName,
+              newAltText,
+              original: imageOldData.original || { size: null },
+              optimized: imageOldData.optimized || { size: null },
+            }
+          : null,
       },
     });
   } catch (error) {
@@ -546,17 +630,11 @@ exports.singleImageOptimization = async (req, reply) => {
       });
     }
 
-    storeUrl = await resolveChannelSiteUrl(
-      storeHash,
-      channelId,
-      accessToken,
-      storeUrl
-    );
-
-    const { error: settingError, settings } = await fetchStoreOptimizationSettings(
-      storeHash,
-      channelId
-    );
+    const [resolvedStoreUrl, { error: settingError, settings }] = await Promise.all([
+      resolveChannelSiteUrl(storeHash, channelId, accessToken, storeUrl),
+      fetchStoreOptimizationSettings(storeHash, channelId),
+    ]);
+    storeUrl = resolvedStoreUrl;
     if (settingError) {
       return reply.status(500).send({ success: false, message: settingError });
     }
@@ -582,6 +660,12 @@ exports.singleImageOptimization = async (req, reply) => {
       const clientStatus = String(
         body.optimization_status || body.status || ""
       ).toLowerCase();
+      const clientSkipReason =
+        clientStatus === "optimizing"
+            ? "Image is currently being optimized. Please wait for the current optimization job to finish."
+            : clientStatus === "optimized"
+              ? "Image is already optimized"
+              : null;
       const alreadyOptimizedOnClient = ["optimized", "optimizing"].includes(
         clientStatus
       );
@@ -589,7 +673,8 @@ exports.singleImageOptimization = async (req, reply) => {
       const { skip, reason } = await shouldSkipImageOptimization(
         storeHash,
         productId,
-        imageId
+        imageId,
+        { accessToken, forceReoptimize }
       );
 
       if (skip || alreadyOptimizedOnClient) {
@@ -598,6 +683,7 @@ exports.singleImageOptimization = async (req, reply) => {
           skipped: true,
           message:
             reason ||
+            clientSkipReason ||
             "Image is already optimized or currently optimizing",
           data: {
             image_id: Number(imageId),
@@ -645,6 +731,19 @@ exports.singleImageOptimization = async (req, reply) => {
     ]);
 
     if (bcImageResult?.notFound && !imageUrl) {
+      if (!forceReoptimize) {
+        return reply.status(200).send({
+          success: true,
+          skipped: true,
+          message:
+            "Image not found on BigCommerce (already replaced or deleted)",
+          data: {
+            image_id: Number(imageId),
+            product_id: Number(productId),
+            status: "skipped",
+          },
+        });
+      }
       return reply.status(404).send({ success: false, message: "Image not found" });
     }
 
@@ -693,8 +792,6 @@ exports.singleImageOptimization = async (req, reply) => {
         fallbackAltText: altText,
         savedFromDb,
       });
-
-    console.log("getting this in placement", placement);
 
     // Metadata-only (filename / alt templates, no compression)
     if (!runOptimize) {
@@ -759,6 +856,16 @@ exports.singleImageOptimization = async (req, reply) => {
       });
     }
 
+    await registerPendingProductImages(storeHash, [
+      { product_id: productId, image_id: imageId },
+    ]);
+
+    const userPlan = req.currentUser?.selectedPlan || "free";
+    const quota = await canOptimizeImages(storeHash, userPlan, 1);
+    if (!quota.allowed) {
+      return reply.status(403).send(buildPlanLimitApiBody(quota));
+    }
+
     const result = await compressImage({
       storeHash,
       storeUrl,
@@ -779,12 +886,43 @@ exports.singleImageOptimization = async (req, reply) => {
       logContext: null
     });
 
+    // Single optimize has no job-item record step — consume pending here.
+    await adjustPendingImages(storeHash, -1);
+
     if (!result.success) {
+      if (result.plan_limit) {
+        return reply.status(403).send(
+          buildPlanLimitApiBody({
+            code: result.code || "MONTHLY_QUOTA_EXCEEDED",
+            message: result.error,
+          })
+        );
+      }
       const bcError = buildBigCommerceError(new Error(result.error));
       return reply.status(bcError.status).send(bcError.body);
     }
 
+    if (result.skipped) {
+      return reply.status(200).send({
+        success: true,
+        skipped: true,
+        message: result.reason || "Image optimization skipped",
+        data: result.data || {
+          image_id: Number(imageId),
+          product_id: Number(productId),
+          status: "skipped",
+        },
+      });
+    }
 
+    await skipPendingJobItemsForImage({
+      storeHash,
+      productId,
+      imageId,
+      skipReason: "Image optimized manually",
+    }).catch((err) => {
+      console.warn("[singleImageOptimization] skipPendingJobItemsForImage:", err?.message);
+    });
 
     return reply.status(200).send({
       success: true,
@@ -857,6 +995,19 @@ exports.bulkImageOptimization = async (req, reply) => {
       });
     }
 
+    const [planBlocked, bulkBlocked] = await Promise.all([
+      replyIfMonthlyPlanLimitExceeded(reply, storeHash, req.currentUser?.selectedPlan),
+      replyIfBulkOptimizationBlocked(reply, storeHash, "product"),
+    ]);
+
+    if (planBlocked) {
+      return;
+    }
+
+    if (bulkBlocked) {
+      return;
+    }
+
     const jobUuid = crypto.randomUUID();
 
     // Create a placeholder job record immediately — status "fetching"
@@ -887,21 +1038,19 @@ exports.bulkImageOptimization = async (req, reply) => {
         settings,
         currency: req.currentUser?.currency || null,
         store_name: req.currentUser?.store_name || null,
+        selectedPlan: req.currentUser?.selectedPlan || "free",
       },
-      {
-        removeOnComplete: 50,
-        removeOnFail: 100,
-        attempts: 1,
-      }
+      coordinatorWorkerJobOptions()
     );
 
     return reply.status(202).send({
       success: true,
-      message: "Bulk optimization started. Catalog is being fetched in the background.",
+      message: buildBulkQueuedMessage("product"),
       data: {
         job_uuid: jobUuid,
         job_type: "bulk",
         status: "fetching",
+        entity_type: "product",
       },
     });
   } catch (error) {
@@ -921,7 +1070,7 @@ exports.getOptimizationJob = async (req, reply) => {
       });
     }
 
-    const { error: statusError, job, logs, items } = await getOptimizationJobStatus(
+    const { error: statusError, job, logs, items, plan_limit } = await getOptimizationJobStatus(
       jobUuid,
       req.storeHash
     );
@@ -942,7 +1091,7 @@ exports.getOptimizationJob = async (req, reply) => {
 
     return reply.status(200).send({
       success: true,
-      data: { job, logs, items },
+      data: { job, logs, items, plan_limit: plan_limit || job?.plan_limit || null },
     });
   } catch (error) {
     console.error("[getOptimizationJob] Error:", error);
@@ -1059,6 +1208,7 @@ exports.bulkRestoreCheckbox = (req, reply) =>
 exports.bulkRestoreAll = async (req, reply) => {
   try {
     const storeHash = req.storeHash;
+    const storeUrl = req.currentUser?.storeUrl || null;
     const accessToken = req.accessToken || req.currentUser?.access_token;
 
     if (!accessToken || !String(accessToken).trim()) {
@@ -1068,13 +1218,58 @@ exports.bulkRestoreAll = async (req, reply) => {
       });
     }
 
-    const items = await fetchRestorableImagesForStore(storeHash);
+    if (!storeUrl) {
+      return reply.status(400).send({
+        success: false,
+        message: "storeUrl is missing. Reinstall app to save store URL.",
+      });
+    }
 
-    req.restoreFetchMeta = {
-      restorable_images: items.length,
-    };
+    if (await replyIfBulkRestoreBlocked(reply, storeHash, "product")) {
+      return;
+    }
 
-    return queueBulkRestoreJobs(req, reply, "restore_bulk", items);
+    const jobUuid = crypto.randomUUID();
+    const { error: placeholderError } = await createRestoreJobPlaceholder({
+      jobUuid,
+      storeHash,
+      jobType: "restore_bulk",
+    });
+
+    if (placeholderError) {
+      return reply.status(500).send({
+        success: false,
+        message: placeholderError,
+      });
+    }
+
+    const restoreRouting = { storeHash, estimatedImages: 0 };
+    const { tier: coordinatorTier } = await addRestoreJob(
+      "restore-bulk-coordinator",
+      {
+        jobUuid,
+        storeHash,
+        storeUrl,
+        accessToken,
+        job_type: "restore_bulk",
+      },
+      {
+        jobId: `restore-bulk-coordinator-${jobUuid}`,
+      },
+      restoreRouting
+    );
+
+    return reply.status(202).send({
+      success: true,
+      message: buildBulkRestoreQueuedMessage("product"),
+      data: {
+        job_uuid: jobUuid,
+        job_type: "restore_bulk",
+        status: "fetching",
+        entity_type: "product",
+        queue_tier: coordinatorTier,
+      },
+    });
   } catch (error) {
     console.error("[bulkRestoreAll] Error:", error);
     return reply.status(500).send({
@@ -1094,10 +1289,18 @@ exports.getRestoreJob = async (req, reply) => {
       });
     }
 
-    const { error: statusError, job, logs, items } = await getRestoreJobStatus(
-      jobUuid,
-      req.storeHash
-    );
+    const page = Math.max(1, Number(req.query?.page) || 1);
+    const limit = Math.min(200, Math.max(1, Number(req.query?.limit) || 50));
+
+    const {
+      error: statusError,
+      job,
+      logs,
+      items,
+      itemsTotal,
+      page: resolvedPage,
+      limit: resolvedLimit,
+    } = await getRestoreJobStatus(jobUuid, req.storeHash, { page, limit });
 
     if (statusError) {
       return reply.status(500).send({
@@ -1115,7 +1318,17 @@ exports.getRestoreJob = async (req, reply) => {
 
     return reply.status(200).send({
       success: true,
-      data: { job, logs, items },
+      data: {
+        job,
+        logs,
+        items,
+        items_pagination: {
+          page: resolvedPage,
+          limit: resolvedLimit,
+          total: itemsTotal,
+          total_pages: Math.ceil((itemsTotal || 0) / resolvedLimit) || 0,
+        },
+      },
     });
   } catch (error) {
     console.error("[getRestoreJob] Error:", error);
@@ -1210,6 +1423,14 @@ exports.updateAltText = async (req, reply) => {
 // Helpers
 //=======================================================
 
+async function replyIfMonthlyPlanLimitExceeded(reply, storeHash, selectedPlan) {
+  const quota = await canOptimizeImages(storeHash, selectedPlan || "free", 1);
+  if (!quota.allowed) {
+    return reply.status(403).send(buildPlanLimitApiBody(quota));
+  }
+  return null;
+}
+
 async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
   try {
     const items =
@@ -1226,6 +1447,22 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
     }
 
     const storeHash = req.storeHash;
+
+    const [planBlocked, bulkBlocked] = await Promise.all([
+      replyIfMonthlyPlanLimitExceeded(reply, storeHash, req.currentUser?.selectedPlan),
+      isFullBulkOptimizationJobType(jobType)
+        ? replyIfBulkOptimizationBlocked(reply, storeHash, "product")
+        : Promise.resolve(false),
+    ]);
+
+    if (planBlocked) {
+      return;
+    }
+
+    if (bulkBlocked) {
+      return;
+    }
+
     const storeUrl = req.currentUser?.storeUrl || null;
     const accessToken = req.accessToken || req.currentUser?.access_token;
 
@@ -1332,7 +1569,7 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
       const clientStatus = String(
         item.optimization_status || item.status || ""
       ).toLowerCase();
-      const alreadyOptimizedOnClient = ["optimized", "optimizing"].includes(
+      const alreadyOptimizedOnClient = ["optimized", "optimizing", "pending"].includes(
         clientStatus
       );
 
@@ -1366,6 +1603,18 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
       });
     }
 
+    const optimizationBatchSize = getOptimizationBatchSize();
+    const useBatchQueue = toQueue.length >= optimizationBatchSize;
+
+    if (useBatchQueue) {
+      let queuedIndex = 0;
+      for (const jobItem of jobItems) {
+        if (jobItem.status !== "queued") continue;
+        jobItem.batch_index = Math.floor(queuedIndex / optimizationBatchSize);
+        queuedIndex += 1;
+      }
+    }
+
     const { error: createJobError, doc: jobDoc } = await createBulkOptimizationJob({
       jobUuid,
       storeHash,
@@ -1374,6 +1623,9 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
       queuedImages: toQueue.length,
       skippedImages: skipped.length,
       jobItems,
+      totalBatches: useBatchQueue
+        ? getOptimizationBatchCount(toQueue.length, optimizationBatchSize)
+        : 0,
     });
 
     if (createJobError || !jobDoc) {
@@ -1383,66 +1635,131 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
       });
     }
 
-    const productContextCache = new Map();
     const storeTemplateOptions = {
       currency: req.currentUser?.currency,
       store_name: req.currentUser?.store_name,
     };
 
-    const toQueueWithMeta = await batchAsync(toQueue, 500, async (entry) => {
-      const imageMeta = await buildJobImageMeta({
-        storeHash,
-        productId: entry.productId,
-        imageId: Number(entry.imageId),
-        accessToken,
-        settings,
-        storeOptions: storeTemplateOptions,
-        productContextCache,
-        placementOverrides: entry.placementSource || {},
-      });
-      return { ...entry, imageMeta };
-    });
+    const routing = {
+      estimatedImages: toQueue.length,
+      storeHash,
+      suppressHeavyWake: true,
+    };
+    const queueTier = pickOptimizationQueueTier(routing);
 
-    const { error: placementSyncError } = await syncQueuedJobItemPlacements(
-      jobUuid,
-      toQueueWithMeta
-    );
+    let queuedCount = toQueue.length;
 
-    if (placementSyncError) {
-      console.error("[queueBulkImageJobs] placement sync:", placementSyncError);
-    }
-
-    const queueResults = await batchAsync(toQueueWithMeta, 500, (entry) =>
-      imageOptimizationQueue.add(
-        "optimize-image",
-        {
+    if (useBatchQueue) {
+      const batchCount = getOptimizationBatchCount(toQueue.length, optimizationBatchSize);
+      const { error: batchQueueError, results, queued, duplicates, paused } =
+        await queueOptimizationBatchJobs({
           jobUuid,
-          job_type: jobType,
+          batchCount,
           storeHash,
           storeUrl,
           accessToken,
-          productId: entry.productId,
-          imageId: entry.imageId,
-          imageUrl: entry.imageUrl,
-          optimization_status: entry.optimization_status,
           settings,
-          imageMeta: entry.imageMeta,
-        },
-        {
-          removeOnComplete: 200,
-          removeOnFail: 500,
-          attempts: 2,
-          backoff: { type: "exponential", delay: 5000 },
-        }
-      )
-    );
+          job_type: jobType,
+          currency: storeTemplateOptions.currency || null,
+          store_name: storeTemplateOptions.store_name || null,
+          estimatedImages: toQueue.length,
+          suppressHeavyWake: true,
+          selectedPlan: req.currentUser?.selectedPlan || "free",
+        });
 
-    const jobs = queueResults.map((bullJob, i) => ({
-      index: toQueueWithMeta[i].index,
-      jobId: bullJob.id,
-      image_id: toQueueWithMeta[i].imageId,
-      product_id: toQueueWithMeta[i].productId,
-    }));
+      if (batchQueueError) {
+        return reply.status(500).send({
+          success: false,
+          message: batchQueueError,
+        });
+      }
+
+      if (paused) {
+        const quota = await canOptimizeImages(
+          storeHash,
+          req.currentUser?.selectedPlan || "free",
+          1
+        );
+        return reply.status(403).send(buildPlanLimitApiBody(quota));
+      }
+
+      if (queueTier === TIER_HEAVY) {
+        await signalHeavyWorkerNeeded();
+      }
+
+      queuedCount = queued;
+      if (duplicates > 0) {
+        console.warn("[queueBulkImageJobs] duplicate batch jobs skipped", {
+          jobUuid,
+          duplicates,
+        });
+      }
+    } else {
+      const productContextCache = new Map();
+
+      const toQueueWithMeta = await batchAsync(toQueue, 500, async (entry) => {
+        const imageMeta = await buildJobImageMeta({
+          storeHash,
+          productId: entry.productId,
+          imageId: Number(entry.imageId),
+          accessToken,
+          settings,
+          storeOptions: storeTemplateOptions,
+          productContextCache,
+          placementOverrides: entry.placementSource || {},
+        });
+        return { ...entry, imageMeta };
+      });
+
+      const { error: placementSyncError } = await syncQueuedJobItemPlacements(
+        jobUuid,
+        toQueueWithMeta
+      );
+
+      if (placementSyncError) {
+        console.error("[queueBulkImageJobs] placement sync:", placementSyncError);
+      }
+
+      const queueResults = await batchAsync(toQueueWithMeta, 500, (entry) =>
+        addOptimizationJob(
+          "optimize-image",
+          {
+            jobUuid,
+            job_type: jobType,
+            storeHash,
+            storeUrl,
+            accessToken,
+            productId: entry.productId,
+            imageId: entry.imageId,
+            imageUrl: entry.imageUrl,
+            optimization_status: entry.optimization_status,
+            settings,
+            imageMeta: entry.imageMeta,
+          },
+          {},
+          routing
+        )
+      );
+
+      if (queueTier === TIER_HEAVY) {
+        await signalHeavyWorkerNeeded();
+      }
+
+      for (let i = 0; i < queueResults.length; i++) {
+        if (!queueResults[i]?.duplicate) continue;
+        const entry = toQueueWithMeta[i];
+        skipped.push({
+          index: entry.index,
+          reason: "Image is already queued for optimization",
+          image_id: entry.imageId ?? null,
+          product_id: entry.productId ?? null,
+        });
+      }
+
+      queuedCount = queueResults.filter(
+        (result) => result?.bullJob && !result.duplicate
+      ).length;
+    }
 
     if (skipped.length > 0) {
       const { error: skipLogError } = await writeOptimizationLogs(
@@ -1464,49 +1781,45 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
       }
     }
 
-    const { error: statusError, job: jobRecord } = await getOptimizationJobStatus(
+    console.log("[queueBulkImageJobs] response ready", {
       jobUuid,
-      storeHash
-    );
+      jobType,
+      storeHash,
+      total: items.length,
+      toQueue: toQueue.length,
+      queuedCount,
+      skipped: skipped.length,
+      queueTier,
+      queue_mode: useBatchQueue ? "batch" : "per-image",
+    });
 
-    if (statusError) {
-      console.error("[queueBulkImageJobs] status fetch:", statusError);
-    }
-
-    const responseData = {
-      job_uuid: jobUuid,
-      job_type: jobType,
-      queue: "image-optimization",
-      total_images: items.length,
-      queued_images: jobs.length,
-      skipped_images: skipped.length,
-      settings: {
-        optimize_image_enabled: Boolean(settings.optimize_image_enabled),
-        is_filename_template_enabled: Boolean(
-          settings.is_filename_template_enabled
-        ),
-        is_alt_text_template_enabled: Boolean(
-          settings.is_alt_text_template_enabled
-        ),
-        image_quality: settings.image_quality,
-        output_format: settings.output_format,
+    await appendImageLog({
+      jobUuid,
+      storeHash,
+      jobType,
+      logType: "info",
+      step: "queue_ready",
+      message: "Bulk optimization queue request ready",
+      meta: {
+        seq: 1,
+        total: items.length,
+        to_queue: toQueue.length,
+        queued_count: queuedCount,
+        skipped: skipped.length,
+        queue_tier: queueTier,
+        queue_mode: useBatchQueue ? "batch" : "per-image",
       },
-      job: jobRecord,
-      jobs,
-      skipped,
-    };
-
-    if (req.catalogFetchMeta) {
-      responseData.catalog = req.catalogFetchMeta;
-    }
+    });
 
     return reply.status(202).send({
       success: true,
-      message: "Bulk optimization queued",
+      message: buildBulkQueuedMessage("product"),
       data: {
         job_uuid: jobUuid,
-        queued: jobs.length,
+        entity_type: "product",
+        queued: queuedCount,
         skipped: skipped.length,
+        queue_mode: useBatchQueue ? "batch" : "per-image",
       },
     });
   } catch (error) {
@@ -1534,6 +1847,16 @@ async function queueBulkRestoreJobs(req, reply, jobType, itemsOverride = null) {
     }
 
     const storeHash = req.storeHash;
+
+    // Full restore_bulk stays blocked if any restore/optimize is active.
+    // restore_checkbox mirrors checkBox optimize — overlapping checkbox restores allowed.
+    if (
+      jobType === "restore_bulk" &&
+      (await replyIfBulkRestoreBlocked(reply, storeHash, "product"))
+    ) {
+      return;
+    }
+
     const storeUrl = req.currentUser?.storeUrl || null;
     const accessToken = req.accessToken || req.currentUser?.access_token;
 
@@ -1551,157 +1874,29 @@ async function queueBulkRestoreJobs(req, reply, jobType, itemsOverride = null) {
       });
     }
 
-    const jobUuid = crypto.randomUUID();
-    const skipped = [];
-    const toQueue = [];
-    const jobItems = [];
-
-    for (let index = 0; index < items.length; index++) {
-      const item = items[index] || {};
-      const shop = item.shop != null ? String(item.shop).trim() : "";
-      const productId = item.product_id;
-      const imageId = item.image_id;
-      const imageUrlRaw = item.image_url;
-      const imageUrlForJob =
-        imageUrlRaw != null && String(imageUrlRaw).trim()
-          ? String(imageUrlRaw).trim()
-          : null;
-
-      const pushSkipped = (reason, extra = {}) => {
-        skipped.push({
-          index,
-          reason,
-          image_id: imageId ?? null,
-          product_id: productId ?? null,
-          ...extra,
-        });
-        if (productId != null && productId !== "" && imageId != null && imageId !== "") {
-          jobItems.push({
-            job_uuid: jobUuid,
-            store_hash: storeHash,
-            job_type: jobType,
-            product_id: Number(productId),
-            image_id: Number(imageId),
-            image_url: imageUrlForJob,
-            status: "skipped",
-            skip_reason: reason,
-          });
-        }
-      };
-
-      if (shop && shop !== storeHash) {
-        pushSkipped("shop does not match authenticated store");
-        continue;
-      }
-
-      if (productId == null || productId === "") {
-        pushSkipped("product_id is required");
-        continue;
-      }
-
-      if (imageId == null || imageId === "") {
-        pushSkipped("image_id is required");
-        continue;
-      }
-
-      const { queue, reason } = await validateRestoreItemForQueue(
-        storeHash,
-        productId,
-        imageId
-      );
-
-      if (!queue) {
-        pushSkipped(reason || "Image is not eligible for restore");
-        continue;
-      }
-
-      jobItems.push({
-        job_uuid: jobUuid,
-        store_hash: storeHash,
-        job_type: jobType,
-        product_id: Number(productId),
-        image_id: Number(imageId),
-        image_url: imageUrlForJob,
-        status: "queued",
-      });
-
-      toQueue.push({
-        index,
-        productId: Number(productId),
-        imageId: Number(imageId),
-        // Placement only — original alt/filename are read from ImageOldData in the worker.
-        overrides: resolveImagePlacementFields(item),
-      });
-    }
-
-    const { error: createJobError, doc: jobDoc } = await createRestoreJob({
-      jobUuid,
+    const restoreRouting = {
+      estimatedImages: items.length,
       storeHash,
+    };
+    const queueTier = pickRestoreQueueTier(restoreRouting);
+
+    const result = await processRestoreItemsInChunks({
+      storeHash,
+      storeUrl,
+      accessToken,
       jobType,
-      totalImages: items.length,
-      queuedImages: toQueue.length,
-      skippedImages: skipped.length,
-      jobItems,
+      items,
     });
 
-    if (createJobError || !jobDoc) {
+    if (result.error) {
       return reply.status(500).send({
         success: false,
-        message: createJobError || "Failed to create restore job in database",
+        message: result.error,
       });
-    }
-
-    const queueResults = await batchAsync(toQueue, 500, (entry) =>
-      imageRestoreQueue.add(
-        "restore-image",
-        {
-          jobUuid,
-          job_type: jobType,
-          storeHash,
-          storeUrl,
-          accessToken,
-          productId: entry.productId,
-          imageId: entry.imageId,
-          overrides: entry.overrides,
-        },
-        {
-          removeOnComplete: 200,
-          removeOnFail: 500,
-          attempts: 2,
-          backoff: { type: "exponential", delay: 5000 },
-        }
-      )
-    );
-
-    const jobs = queueResults.map((bullJob, i) => ({
-      index: toQueue[i].index,
-      jobId: bullJob.id,
-      image_id: toQueue[i].imageId,
-      product_id: toQueue[i].productId,
-    }));
-
-    if (skipped.length > 0) {
-      const { error: skipLogError } = await writeRestoreLogs(
-        skipped.map((skip) => ({
-          job_uuid: jobUuid,
-          store_hash: storeHash,
-          job_type: jobType,
-          image_id: skip.image_id,
-          product_id: skip.product_id,
-          log_type: "warning",
-          step: "skip",
-          message: skip.reason,
-          meta: { index: skip.index },
-        }))
-      );
-
-      if (skipLogError) {
-        console.error("[queueBulkRestoreJobs] skip logs:", skipLogError);
-      }
     }
 
     const { error: statusError, job: jobRecord } = await getRestoreJobStatus(
-      jobUuid,
+      result.jobUuid,
       storeHash
     );
 
@@ -1709,25 +1904,21 @@ async function queueBulkRestoreJobs(req, reply, jobType, itemsOverride = null) {
       console.error("[queueBulkRestoreJobs] status fetch:", statusError);
     }
 
-    const responseData = {
-      job_uuid: jobUuid,
-      job_type: jobType,
-      queue: "image-restore",
-      total_images: items.length,
-      queued_images: jobs.length,
-      skipped_images: skipped.length,
-      job: jobRecord,
-      jobs,
-      skipped,
-    };
-
-    if (req.restoreFetchMeta) {
-      responseData.catalog = req.restoreFetchMeta;
-    }
-
     return reply.status(202).send({
       success: true,
-      message: "Images restored",
+      message: buildBulkRestoreQueuedMessage("product"),
+      data: {
+        job_uuid: result.jobUuid,
+        entity_type: "product",
+        job_type: jobType,
+        queue: queueTier === "heavy" ? "image-restore-heavy" : `image-restore-${queueTier}`,
+        queue_tier: result.queueTier || queueTier,
+        total_images: result.totalImages,
+        queued_images: result.queuedImages,
+        skipped_images: result.skippedImages,
+        job: jobRecord,
+        skipped: result.skipped,
+      },
     });
   } catch (error) {
     console.error("[queueBulkRestoreJobs] Error:", error);

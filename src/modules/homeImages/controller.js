@@ -1,12 +1,8 @@
-const { User } = require("../../models");
-const { performance } = require("perf_hooks");
 const { parseChannelId, resolveChannelSiteUrl } = require("../../utils/channelContext");
 const { buildBigCommerceError } = require("../imageOptimization/services");
 const { getHomeImagesService } = require("./services");
 
 exports.getHomeImagesController = async (req, reply) => {
-  const apiStart = performance.now();
-
   try {
     const body = req.body || {};
     const storeHash = req.storeHash;
@@ -26,12 +22,7 @@ exports.getHomeImagesController = async (req, reply) => {
       });
     }
 
-    const user = await User.findOne(
-      { store_hash: storeHash },
-      { storeUrl: 1, access_token: 1, _id: 0 }
-    ).lean();
-
-    if (!user) {
+    if (!req.currentUser) {
       return reply.status(404).send({
         success: false,
         message: "Store is not installed",
@@ -51,7 +42,7 @@ exports.getHomeImagesController = async (req, reply) => {
       storeHash,
       channelId,
       accessToken,
-      user.storeUrl || null
+      req.currentUser.storeUrl || null
     );
 
     if (!storeUrl) {
@@ -61,24 +52,12 @@ exports.getHomeImagesController = async (req, reply) => {
       });
     }
 
-    const bcStart = performance.now();
     const result = await getHomeImagesService({
       storeHash,
       accessToken,
       storeUrl,
       channelId,
     });
-    
-    const bcEnd = performance.now();
-
-    console.log(
-      `[BigCommerce API] home images ${(bcEnd - bcStart).toFixed(2)} ms`
-    );
-
-    const apiEnd = performance.now();
-    console.log(
-      `[getHomeImagesController] Total API Time: ${(apiEnd - apiStart).toFixed(2)} ms`
-    );
 
     return reply.status(200).send(result);
   } catch (error) {

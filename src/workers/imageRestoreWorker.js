@@ -1,166 +1,76 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const { config: loadEnv } = require("dotenv");
-const appConfig = require("../config");
 const { Worker } = require("bullmq");
 const { createRedisConnection } = require("../db/redis");
 const { connectMongo } = require("../db/mongo");
-const { QUEUE_NAME } = require("../queue/imageRestoreQueue");
-const { restoreSingleImage } = require("../modules/imageOptimization/utils/restoreImage");
 const {
-  setRestoreJobItemStatus,
-  recordRestoreJobImageResult,
-  resolveImagePlacementFields,
-  appendImageLog,
-} = require("../modules/imageOptimization/services");
-
+  resolveTier,
+  getQueueNameForTier,
+  getWorkerConcurrencyForTier,
+  LEGACY_QUEUE_NAME,
+  STANDARD_TIERS,
+} = require("../queue/imageRestoreQueues");
+const { processImageRestoreJob } = require("./imageRestoreProcessor");
+const { appendImageLog } = require("../modules/imageOptimization/services");
 const envPath = [path.join(process.cwd(), ".env"), path.join(__dirname, "../.env")].find(
   (p) => fs.existsSync(p)
 );
 if (envPath) loadEnv({ path: envPath });
 
-const connection = createRedisConnection("bullmq-image-restore-worker");
+const tierFromEnv = resolveTier(
+  process.env.IMAGE_RESTORE_QUEUE_TIER || process.env.RESTORE_QUEUE_TIER
+);
+const listenLegacy =
+  String(process.env.IMAGE_RESTORE_LISTEN_LEGACY || "").toLowerCase() === "true";
 
-let worker;
+function tiersToStart() {
+  if (tierFromEnv) {
+    return [tierFromEnv];
+  }
+  // Heavy pool is only started on demand by restoreHeavySupervisor.
+  return [...STANDARD_TIERS];
+}
 
-async function startWorker() {
-  await connectMongo();
+function resolveWorkerName() {
+  if (tierFromEnv === "2") return "image-restore-2";
+  if (tierFromEnv === "3") return "image-restore-3";
+  if (tierFromEnv === "heavy") return "image-restore-heavy";
+  return "image-restore-2";
+}
 
-  worker = new Worker(
-    QUEUE_NAME,
-    async (job) => {
-      const {
-        jobUuid,
-        job_type: jobTypeFromData,
-        storeHash,
-        storeUrl,
-        accessToken,
-        productId,
-        imageId,
-        overrides = {},
-      } = job.data;
+const WORKER_NAME = resolveWorkerName();
 
-      const jobType = jobTypeFromData || "restore_bulk";
-      const maxAttempts = job.opts.attempts || 1;
-      const isLastAttempt = job.attemptsMade + 1 >= maxAttempts;
-      const logContext = jobUuid
-        ? { jobUuid, storeHash, jobType, productId, imageId }
-        : null;
+const workers = [];
+const connections = [];
 
-      if (jobUuid) {
-        const { error: statusError } = await setRestoreJobItemStatus({
-          jobUuid,
-          productId,
-          imageId,
-          status: "restoring",
-        });
-
-        if (statusError) {
-          console.error("[image-restore-worker] restoring status:", statusError);
-          await appendImageLog({
-            jobUuid,
-            storeHash,
-            jobType,
-            imageId,
-            productId,
-            logType: "error",
-            step: "worker",
-            message: "Failed to set job item status to restoring",
-            meta: { error: statusError },
-          });
-        }
-      }
-
-      let success = false;
-      let resultData = null;
-      let errorMessage = null;
-
-      try {
-        const placement = resolveImagePlacementFields(overrides);
-        const result = await restoreSingleImage({
-          storeHash,
-          storeUrl,
-          accessToken,
-          productId,
-          imageId,
-          overrides: {
-            ...overrides,
-            placement,
-          },
-          logContext,
-        });
-
-        if (!result.success) {
-          errorMessage = result.error || "Image restore failed";
-          if (isLastAttempt) {
-            success = false;
-          } else if (!result.skipped) {
-            throw new Error(errorMessage);
-          } else {
-            success = false;
-          }
-        } else {
-          success = true;
-          resultData = result.data;
-        }
-      } catch (err) {
-        errorMessage = err?.message || "Image restore failed";
-        if (!isLastAttempt) {
-          throw err;
-        }
-        success = false;
-      }
-
-      if (jobUuid && (success || isLastAttempt)) {
-        const { error: recordError } = await recordRestoreJobImageResult({
-          jobUuid,
-          storeHash,
-          success,
-          imageId,
-          productId,
-          errorMessage,
-          jobType,
-          meta: resultData || {},
-        });
-
-        if (recordError) {
-          console.error("[image-restore-worker] record failed:", recordError);
-          throw new Error(recordError);
-        }
-      }
-
-      if (!success) {
-        throw new Error(errorMessage || "Image restore failed");
-      }
-
-      return resultData;
-    },
-    {
-      connection,
-      concurrency: appConfig.workers.restoreConcurrency,
-    }
-  );
-
+function attachWorkerEvents(worker, queueName) {
   worker.on("completed", (job) => {
     console.log("[image-restore-worker] completed", {
+      queue: queueName,
       jobId: job.id,
+      name: job.name,
       jobUuid: job.data?.jobUuid,
       imageId: job.data?.imageId,
       productId: job.data?.productId,
+      chunkIndex: job.data?.chunkIndex,
     });
   });
 
   worker.on("failed", async (job, err) => {
     console.error("[image-restore-worker] failed", {
+      queue: queueName,
       jobId: job?.id,
+      name: job?.name,
       jobUuid: job?.data?.jobUuid,
       imageId: job?.data?.imageId,
       productId: job?.data?.productId,
+      chunkIndex: job?.data?.chunkIndex,
       error: err?.message,
     });
 
     const data = job?.data;
-    if (data?.storeHash) {
+    if (data?.storeHash && job?.name !== "restore-chunk") {
       await appendImageLog({
         jobUuid: data.jobUuid,
         storeHash: data.storeHash,
@@ -173,19 +83,71 @@ async function startWorker() {
         meta: {
           bull_job_id: job?.id,
           attempts_made: job?.attemptsMade,
+          queue: queueName,
         },
       });
     }
   });
+}
 
-  console.log("[image-restore-worker] started", { queue: QUEUE_NAME });
+async function startWorkerForTier(tier) {
+  const queueName = getQueueNameForTier(tier);
+  const connection = createRedisConnection(`bullmq-image-restore-worker-${tier}`);
+  const concurrency = getWorkerConcurrencyForTier(tier);
+
+  const worker = new Worker(
+    queueName,
+    processImageRestoreJob,
+    {
+    connection,
+    concurrency,
+  }
+  );
+
+  attachWorkerEvents(worker, queueName);
+  workers.push(worker);
+  connections.push(connection);
+
+  console.log("[image-restore-worker] started", { queue: queueName, tier, concurrency });
+}
+
+async function startLegacyWorker() {
+  const connection = createRedisConnection("bullmq-image-restore-worker-legacy");
+  const worker = new Worker(
+    LEGACY_QUEUE_NAME,
+    processImageRestoreJob,
+    {
+    connection,
+    concurrency: getWorkerConcurrencyForTier("2"),
+  }
+  );
+
+  attachWorkerEvents(worker, LEGACY_QUEUE_NAME);
+  workers.push(worker);
+  connections.push(connection);
+
+  console.log("[image-restore-worker] started legacy drain", {
+    queue: LEGACY_QUEUE_NAME,
+  });
+}
+
+async function startWorker() {
+  await connectMongo();
+  const tiers = tiersToStart();
+  for (const tier of tiers) {
+    await startWorkerForTier(tier);
+  }
+
+  if (listenLegacy) {
+    await startLegacyWorker();
+  }
 }
 
 async function shutdown(signal) {
   try {
     console.log(`[image-restore-worker] shutting down (${signal})...`);
-    if (worker) await worker.close();
-    await connection.quit();
+    await Promise.all(workers.map((worker) => worker.close()));
+    await Promise.all(connections.map((connection) => connection.quit()));
     process.exit(0);
   } catch (err) {
     console.error("[image-restore-worker] shutdown error", err);

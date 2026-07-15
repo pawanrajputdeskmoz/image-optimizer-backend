@@ -14,6 +14,7 @@ const fetchAllProductsSchema = {
       ...commonContextProperties,
       page: { type: ["integer", "string"] },
       limit: { type: ["integer", "string"] },
+      search: { type: "string" },
     },
   },
 };
@@ -157,6 +158,8 @@ const restoreImageSchema = {
   },
 };
 
+const getStoreDashboardStatsSchema = {};
+
 module.exports = {
   fetchAllProductsSchema,
   singleImageOptimizationSchema,
@@ -167,4 +170,5 @@ module.exports = {
   restoreImageSchema,
   bulkRestoreSchema,
   bulkRestoreAllSchema,
+  getStoreDashboardStatsSchema,
 };

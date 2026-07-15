@@ -63,8 +63,9 @@ const UserSchema = new mongoose.Schema(
     },
     selectedPlan: {
       type: String,
-      enum: ["free", "basic", "pro", "enterprise"],
-      default: null,
+      trim: true,
+      lowercase: true,
+      default: "free",
     },
     primaryDomain: {
       type: String,

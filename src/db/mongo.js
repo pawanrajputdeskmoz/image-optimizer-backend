@@ -26,6 +26,9 @@ async function connectMongo() {
       await HomeBannerImage.syncModelIndexes();
     }
 
+    const { ensureDefaultPlans } = require("../modules/plans/service");
+    await ensureDefaultPlans();
+
     console.log("✅ MongoDB connected via Mongoose");
 
     return mongoose.connection;

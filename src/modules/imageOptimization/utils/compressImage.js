@@ -1,14 +1,11 @@
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const sharp = require("sharp");
-const config = require("../../../config");
 const { del } = require("../../../utils/axiosUtils");
 const { deleteFile } = require("../../../utils/deleteFile");
 const { downloadImage } = require("../../../utils/downloadImage");
 const {
   optimizeImage,
-  getImageSizeFromUrl,
-  getImageSizeFromUrlWithRetry,
   resolveImageTypeOptimizeFormat,
 } = require("../../../utils/sharpFunction");
 const { resolveProductImageUrl } = require("./urls");
@@ -21,9 +18,17 @@ const {
 const {
   updateBigCommerceProductImageMetadata,
   incrementMetadataUpdateStats,
+  shouldSkipImageOptimization,
+  skipPendingJobItemsForImage,
 } = require("../services");
+const { recordMonthlyOptimization } = require("../../../utils/monthlyUsage");
 const { appendImageLog, resolveJobUuid } = require("./imageActivityLog");
-const { replaceProductImage } = require("./bigCommerceProductImage");
+const {
+  replaceProductImage,
+  resolveOptimizationUploadDescription,
+  normalizeUploadDescription,
+  fetchProductImageById,
+} = require("./bigCommerceProductImage");
 
 async function logCompressActivity(
   logContext,
@@ -70,7 +75,31 @@ exports.compressImage = async ({
   settings,
   imageMeta = {},
   logContext = null,
+  skipQuotaCheck = false,
 }) => {
+  if (!skipQuotaCheck && storeHash) {
+    const User = require("../../../models/User");
+    const {
+      canOptimizeImages,
+      MONTHLY_PLAN_LIMIT_MESSAGE,
+    } = require("../../plans/service");
+    const user = await User.findOne({ store_hash: storeHash })
+      .select({ selectedPlan: 1 })
+      .lean();
+    const quota = await canOptimizeImages(storeHash, user?.selectedPlan || "free", 1);
+    if (!quota.allowed) {
+      const { clearStoreOptimizationJobs } = require("../../../queue/imageOptimizationQueues");
+      await clearStoreOptimizationJobs(storeHash).catch((err) => {
+        console.error("[compressImage] clearStoreOptimizationJobs:", err?.message);
+      });
+      return {
+        success: false,
+        plan_limit: true,
+        error: quota.message || MONTHLY_PLAN_LIMIT_MESSAGE,
+        code: quota.code,
+      };
+    }
+  }
   const effectiveLogContext = {
     jobType: "single",
     productId,
@@ -92,19 +121,58 @@ exports.compressImage = async ({
 
   const runOptimize =
     runOptimizeFromMeta ?? Boolean(settings?.optimize_image_enabled);
+  const preservedOldAltText = normalizeUploadDescription(oldAltText) ?? null;
+  const preservedNewAltText = runAltText
+    ? normalizeUploadDescription(newAltText) ?? null
+    : null;
 
   let filePath = null;
   let optimizedImagePath = null;
   let uploadedImage = null;
   let imageOptimizationDoc = null;
 
+  const buildSkipResponse = (reason) => ({
+    success: true,
+    skipped: true,
+    reason: reason || "Image skipped",
+    data: {
+      old_image_id: imageId,
+      new_image_id: imageId,
+      status: "skipped",
+      skip_reason: reason,
+    },
+  });
+
+  const t0 = Date.now();
+
   try {
+    // BC existence is re-verified by replaceProductImage before upload, so no
+    // accessToken here (avoids a duplicate BC images-list fetch).
+    const { skip, reason: skipReason } = await shouldSkipImageOptimization(
+      storeHash,
+      productId,
+      imageId
+    );
+    if (skip) {
+      await logCompressActivity(
+        effectiveLogContext,
+        { storeHash, productId, imageId },
+        {
+          logType: "warning",
+          step: "skip",
+          message: skipReason || "Image optimization skipped",
+        }
+      );
+      return buildSkipResponse(skipReason);
+    }
+
     const {
       error: downloadError,
       filePath: downloadedFilePath,
       optimizedImagesDir,
       assetId,
     } = await downloadImage({ imageUrl, storeHash, productId, imageId });
+    const tDownload = Date.now();
 
     filePath = downloadedFilePath;
 
@@ -131,11 +199,41 @@ exports.compressImage = async ({
         logType: "info",
         step: "download",
         message: "Image downloaded for optimization",
-        meta: { path: filePath },
+        meta: { path: filePath, duration_ms: tDownload - t0 },
       }
     );
 
     if (!runOptimize) {
+      const bcImage = accessToken
+        ? await fetchProductImageById({
+            storeHash,
+            productId,
+            imageId,
+            accessToken,
+          })
+        : null;
+
+      if (accessToken && !bcImage) {
+        await logCompressActivity(
+          effectiveLogContext,
+          { storeHash, productId, imageId },
+          {
+            logType: "warning",
+            step: "skip",
+            message:
+              "Image not found on BigCommerce (already replaced or deleted)",
+          }
+        );
+        try {
+          await deleteFile(filePath);
+        } catch {
+          // ignore cleanup errors
+        }
+        return buildSkipResponse(
+          "Image not found on BigCommerce (already replaced or deleted)"
+        );
+      }
+
       const metadataPayload = {};
       if (sortOrder != null) metadataPayload.sortOrder = sortOrder;
       if (isThumbnail != null) metadataPayload.isThumbnail = isThumbnail;
@@ -157,9 +255,9 @@ exports.compressImage = async ({
         {
           $set: {
             imageName: oldImageName,
-            altText: oldAltText,
+            altText: preservedOldAltText,
             ...(runFilename && newImageName ? { newImageName } : {}),
-            ...(runAltText && newAltText ? { newAltText } : {}),
+            ...(runAltText && preservedNewAltText ? { newAltText: preservedNewAltText } : {}),
           },
         },
         { upsert: true }
@@ -260,9 +358,9 @@ exports.compressImage = async ({
           $set: {
             original_image_path: filePath,
             imageName: oldImageName,
-            altText: oldAltText,
+            altText: preservedOldAltText,
             ...(runFilename && newImageName ? { newImageName } : {}),
-            ...(runAltText && newAltText ? { newAltText } : {}),
+            ...(runAltText && preservedNewAltText ? { newAltText: preservedNewAltText } : {}),
           },
         },
         { upsert: true }
@@ -300,6 +398,7 @@ exports.compressImage = async ({
       throw new Error(optimizeError);
     }
     optimizedImagePath = optimizedImage.outputPath;
+    const tCompress = Date.now();
 
     await logCompressActivity(
       effectiveLogContext,
@@ -311,6 +410,7 @@ exports.compressImage = async ({
         meta: {
           output_path: optimizedImagePath,
           saved_bytes: optimizedImage.compression?.savedBytes,
+          duration_ms: tCompress - tDownload,
         },
       }
     );
@@ -320,12 +420,11 @@ exports.compressImage = async ({
       runFilename && newImageName && String(newImageName).trim()
         ? path.basename(String(newImageName).trim())
         : path.basename(optimizedImage.outputPath);
-    const uploadDescription =
-      runAltText && newAltText && String(newAltText).trim()
-        ? String(newAltText).trim()
-        : oldAltText && String(oldAltText).trim()
-          ? String(oldAltText).trim()
-          : "Optimized image";
+    const uploadDescription = resolveOptimizationUploadDescription({
+      runAltText,
+      newAltText,
+      oldAltText,
+    });
     const replacementResult = await replaceProductImage({
       storeHash,
       productId,
@@ -336,9 +435,55 @@ exports.compressImage = async ({
       description: uploadDescription,
       sortOrder: sortOrder != null ? sortOrder : 1,
       isThumbnail,
-      verifyPollIntervalMs: 1000,
-      verifyMaxRetries: 10,
+      verifyPollIntervalMs: 400,
+      verifyMaxRetries: 3,
     });
+    const tReplace = Date.now();
+
+    if (replacementResult?.skipped) {
+      const skipMessage =
+        replacementResult.skipReason ||
+        "Image not found on BigCommerce (already replaced or deleted)";
+
+      if (imageOptimizationDoc?._id) {
+        await ImageOptimization.deleteOne({ _id: imageOptimizationDoc._id }).catch(
+          () => {}
+        );
+      }
+
+      await ImageStatus.updateOne(
+        { store_hash: storeHash, product_id: productId, image_id: imageId },
+        {
+          $set: {
+            status: "pending",
+            image_update_status: "idle",
+          },
+        }
+      ).catch(() => {});
+
+      try {
+        if (filePath) await deleteFile(filePath);
+      } catch {
+        // ignore cleanup errors
+      }
+      try {
+        if (optimizedImagePath) await deleteFile(optimizedImagePath);
+      } catch {
+        // ignore cleanup errors
+      }
+
+      await logCompressActivity(
+        effectiveLogContext,
+        { storeHash, productId, imageId },
+        {
+          logType: "warning",
+          step: "skip",
+          message: skipMessage,
+        }
+      );
+
+      return buildSkipResponse(skipMessage);
+    }
 
     uploadedImage = replacementResult?.newImage || null;
     if (!uploadedImage?.id) {
@@ -352,7 +497,11 @@ exports.compressImage = async ({
         logType: "info",
         step: "upload",
         message: "Optimized image uploaded to BigCommerce",
-        meta: { new_image_id: uploadedImage.id },
+        meta: {
+          new_image_id: uploadedImage.id,
+          duration_ms: tReplace - tCompress,
+          verify_attempts: replacementResult?.verification?.attempts,
+        },
       }
     );
 
@@ -402,31 +551,11 @@ exports.compressImage = async ({
       );
     }
 
-    const sizeFetchOptions = {
-      retries: config.image.sizeFetchRetries,
-      retryDelayMs: config.image.sizeFetchRetryDelayMs,
-    };
-
-    const [originalFromBc, optimizedFromBc] = await Promise.all([
-      getImageSizeFromUrl(imageUrl, sizeFetchOptions),
-      getImageSizeFromUrlWithRetry(optimizedBcUrl, sizeFetchOptions),
-    ]);
-
-    if (optimizedFromBc.bytes == null) {
-      throw new Error(
-        optimizedFromBc.error ||
-        "Failed to calculate optimized image size from storefront URL"
-      );
-    }
-
-    const origSize =
-      Number(optimizedImage.original?.size) ||
-      Number(originalFromBc.bytes) ||
-      0;
-    const optSize =
-      Number(optimizedImage.optimized?.size) ||
-      Number(optimizedFromBc.bytes) ||
-      0;
+    // optimizedImage.original/optimized already hold the exact bytes read
+    // from disk and uploaded to BC, so reuse them instead of re-fetching the
+    // same sizes/dimensions from the CDN (BC doesn't alter the file we sent).
+    const origSize = Number(optimizedImage.original?.size) || 0;
+    const optSize = Number(optimizedImage.optimized?.size) || 0;
     const savedBytes =
       optimizedImage.compression?.savedBytes != null
         ? Math.max(0, optimizedImage.compression.savedBytes)
@@ -445,15 +574,10 @@ exports.compressImage = async ({
       usedOriginalBytes: Boolean(optimizedImage.usedOriginalBytes),
       original: {
         ...(optimizedImage.original || {}),
-        width: originalFromBc.width ?? optimizedImage.original?.width,
-        height: originalFromBc.height ?? optimizedImage.original?.height,
-        format: originalFromBc.format ?? optimizedImage.original?.format,
         size: origSize,
       },
       optimized: {
-        width: optimizedFromBc.width ?? optimizedImage.optimized?.width,
-        height: optimizedFromBc.height ?? optimizedImage.optimized?.height,
-        format: optimizedFromBc.format ?? optimizedImage.optimized?.format,
+        ...(optimizedImage.optimized || {}),
         size: optSize,
       },
       compression: { savedBytes, savedPercent },
@@ -480,9 +604,9 @@ exports.compressImage = async ({
           $set: {
             image_id: newImageId,
             imageName: oldImageName,
-            altText: oldAltText,
+            altText: preservedOldAltText,
             ...(runFilename && newImageName ? { newImageName } : {}),
-            ...(runAltText && newAltText ? { newAltText } : {}),
+            ...(runAltText && preservedNewAltText ? { newAltText: preservedNewAltText } : {}),
             original: optimizedImageResponse.original,
             optimized: optimizedImageResponse.optimized,
             saved_bytes: savedBytes,
@@ -529,6 +653,11 @@ exports.compressImage = async ({
           { $set: { average_saving_percent: (totalSaved / totalOrig) * 100 } }
         );
       }
+
+      recordMonthlyOptimization(storeHash, "product").catch((err) => {
+        console.error("[compressImage] monthly usage track failed:", err);
+      });
+
     } catch (statErr) {
       console.error("[compressImage] StoreImageStat error:", statErr);
       await logCompressActivity(
@@ -564,6 +693,26 @@ exports.compressImage = async ({
         );
       }
     }
+
+    await skipPendingJobItemsForImage({
+      storeHash,
+      productId,
+      imageId,
+      skipReason: "Image optimized elsewhere",
+      excludeJobUuid: effectiveLogContext?.jobUuid || null,
+    }).catch((err) => {
+      console.warn("[compressImage] skipPendingJobItemsForImage:", err?.message);
+    });
+
+    console.log("[compressImage] timing_ms", {
+      productId,
+      imageId,
+      download: tDownload - t0,
+      compress: tCompress - tDownload,
+      bc_replace: tReplace - tCompress,
+      finalize: Date.now() - tReplace,
+      total: Date.now() - t0,
+    });
 
     return {
       success: true,

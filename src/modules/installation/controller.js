@@ -7,13 +7,75 @@ const {
   signAppApiToken,
 } = require("./services");
 const { get } = require("../../utils/axiosUtils");
+const { trackProductWebhookBurst } = require("../imageOptimization/services");
+const { trackCategoryWebhookBurst } = require("../categoryImages/services");
+const { appendWebhookLog, upsertWebhookEvent } = require("./utils/webhookActivityLog");
+const {
+  appendCategoryWebhookLog,
+  upsertCategoryWebhookEvent,
+} = require("./utils/categoryWebhookActivityLog");
+const { queueWelcomeEmail } = require("../../utils/mail/sendWelcomeEmail");
+const { User, StoreOptimizationSettings } = require("../../models");
 
-const { User , StoreOptimizationSettings} = require("../../models");
+async function persistWebhookEvent(webhook, fields) {
+  if (webhook?.isCategory || webhook?.entityType === "category") {
+    return upsertCategoryWebhookEvent({
+      traceId: webhook.traceId,
+      storeHash: webhook.storeHash,
+      eventHash: webhook.hash,
+      scope: webhook.scope,
+      categoryId: webhook.categoryId,
+      storeId: fields.storeId,
+      status: fields.status,
+      payload: fields.payload ?? webhook.payload,
+      errorMessage: fields.errorMessage ?? null,
+    });
+  }
+
+  return upsertWebhookEvent({
+    traceId: webhook.traceId,
+    storeHash: webhook.storeHash,
+    eventHash: webhook.hash,
+    scope: webhook.scope,
+    productId: webhook.productId,
+    storeId: fields.storeId,
+    status: fields.status,
+    payload: fields.payload ?? webhook.payload,
+    errorMessage: fields.errorMessage ?? null,
+  });
+}
+
+async function persistWebhookLog(webhook, fields) {
+  if (webhook?.isCategory || webhook?.entityType === "category") {
+    return appendCategoryWebhookLog({
+      traceId: fields.traceId ?? webhook.traceId,
+      storeHash: fields.storeHash ?? webhook.storeHash,
+      eventHash: fields.eventHash ?? webhook.hash,
+      scope: fields.scope ?? webhook.scope,
+      categoryId: fields.categoryId ?? webhook.categoryId,
+      logType: fields.logType,
+      step: fields.step,
+      message: fields.message,
+      meta: fields.meta,
+    });
+  }
+
+  return appendWebhookLog({
+    traceId: fields.traceId ?? webhook.traceId,
+    storeHash: fields.storeHash ?? webhook.storeHash,
+    eventHash: fields.eventHash ?? webhook.hash,
+    scope: fields.scope ?? webhook.scope,
+    productId: fields.productId ?? webhook.productId,
+    imageId: fields.imageId,
+    logType: fields.logType,
+    step: fields.step,
+    message: fields.message,
+    meta: fields.meta,
+  });
+}
 
 exports.installApp = async (req, reply) => {
   const { code, context, scope } = req.query;
-
-  console.log("[STORE-CONTROLLER] installApp called ------ ");
 
   if (!code || !context || !scope) {
     return reply.status(400).send({
@@ -24,12 +86,10 @@ exports.installApp = async (req, reply) => {
   }
 
   try {
-    console.log("start 0")
     const data = await exchangeOAuthToken({ code, scope, context });
 
     const { access_token, user, context: storeHashData } = data;
     const storeHash = storeHashData?.replace("stores/", "") || null;
-    console.log("start end", data)
 
     if (!storeHash) {
       return reply.status(400).send({
@@ -38,7 +98,6 @@ exports.installApp = async (req, reply) => {
       });
     }
 
-    console.log("start")
     const storeInfoResponse = await get(
       `https://api.bigcommerce.com/stores/${storeHash}/v2/store`,
       {
@@ -49,10 +108,6 @@ exports.installApp = async (req, reply) => {
     );
     const storeInfo = storeInfoResponse?.data || {};
 
-    console.log("end")
-
-
-
     await saveInstalledStore({
       storeHash,
       access_token,
@@ -61,32 +116,40 @@ exports.installApp = async (req, reply) => {
       storeInfo,
     });
 
-    console.log("check point 3 ");
+    console.log("[install] completed", {
+      storeHash,
+      storeName: storeInfo.name || null,
+    });
 
-    console.log(
-      "[STORE-CONTROLLER] app installed successfully ------ ",
-      storeInfo.name
-    );
-    console.log(
-      "[STORE-CONTROLLER] Redirecting to BigCommerce dashboard ------ ",
-      getManageAppRedirectUrl(storeHash)
+    // Reinstall-safe: keep existing settings; create defaults only if missing
+    await StoreOptimizationSettings.findOneAndUpdate(
+      { store_hash: storeHash, channel_id: 1 },
+      {
+        $setOnInsert: {
+          store_hash: storeHash,
+          channel_id: 1,
+          optimize_image_enabled: true,
+          is_filename_template_enabled: false,
+          filename_template: "[name]",
+          is_alt_text_template_enabled: false,
+          alt_text_template: "[name]",
+          image_quality: 80,
+          output_format: "jpeg",
+          auto_optimize_new_images: false,
+          auto_optimize_new_category_images: false,
+        },
+      },
+      { upsert: true }
     );
 
-    await StoreOptimizationSettings.create({
-      store_hash: storeHash,
-      optimize_image_enabled: true,
-      is_filename_template_enabled: false,
-      filename_template: "[name]",
-      is_alt_text_template_enabled: false,
-      alt_text_template: "[name]",
-      image_quality: 80,
-      output_format: "jpeg",
-      auto_optimize_new_images: true,
+    queueWelcomeEmail({
+      email: user?.email,
+      storeName: storeInfo?.name || storeHash,
     });
 
     return reply.redirect(getManageAppRedirectUrl(storeHash));
   } catch (err) {
-    console.error("[STORE-CONTROLLER] Install app failed:", {
+    console.error("[install] failed:", {
       message: err.message,
       status: err.response?.status,
       storeHash: req.query.context?.replace("stores/", "") || "unknown",
@@ -109,16 +172,18 @@ exports.installApp = async (req, reply) => {
 };
 
 exports.uninstallApp = async (req, reply) => {
-  const { signed_payload } = req.query;
+  const { signed_payload_jwt } = req.query;
 
-  if (!signed_payload) {
+  if (!signed_payload_jwt) {
     return reply.status(400).send("Missing signed_payload_jwt");
   }
 
   try {
-    const payload = verifySignedPayloadJwt(signed_payload);
-    console.log("getting this is payload", payload);
-    const { storeHash } = payload;
+    const payload = verifySignedPayloadJwt(signed_payload_jwt);
+    const storeHash =
+      payload?.store_hash ||
+      (typeof payload?.sub === "string" ? payload.sub.split("/")[1] : null) ||
+      null;
 
     if (!storeHash) {
       return reply.status(400).send("Invalid store hash in JWT");
@@ -135,7 +200,7 @@ exports.uninstallApp = async (req, reply) => {
 
     return reply.status(200).send("OK");
   } catch (err) {
-    console.error(" uninstall failed:", err);
+    console.error("[uninstall] failed:", err);
     return reply.status(401).send("Invalid JWT");
   }
 };
@@ -154,8 +219,6 @@ exports.loadBigComApp = async (req, reply) => {
     const decoded = verifySignedPayloadJwt(signed_payload_jwt, {
       expiresIn: "2d",
     });
-
-
 
     const storeHash = decoded?.sub?.split("/")[1];
     const user = decoded?.user;
@@ -205,7 +268,7 @@ exports.loadBigComApp = async (req, reply) => {
       });
     }
 
-    const api_token = signAppApiToken(storeHash, userInfo.access_token,);
+    const api_token = signAppApiToken(storeHash, userInfo.access_token);
 
     return reply.status(200).send({
       success: true,
@@ -227,5 +290,138 @@ exports.loadBigComApp = async (req, reply) => {
       success: false,
       message: "Invalid or expired token",
     });
+  }
+};
+
+exports.handleProductWebhook = async (req, reply) => {
+  const webhook = req.bigCommerceWebhook;
+
+  try {
+    if (webhook?.deduplicated) {
+      return reply.status(200).send("OK");
+    }
+
+    const isProductScope = webhook?.scope?.startsWith("store/product/");
+    const isCategoryScope = webhook?.scope?.startsWith("store/category/");
+
+    if (!isProductScope && !isCategoryScope) {
+      if (webhook) {
+        await persistWebhookEvent(webhook, {
+          storeId: webhook.payload?.store_id ? String(webhook.payload.store_id) : null,
+          status: "scope_ignored",
+        });
+        await persistWebhookLog(webhook, {
+          logType: "warning",
+          step: "scope_ignored",
+          message: "Webhook ignored because scope is not supported",
+        });
+      }
+      return reply.status(200).send("OK");
+    }
+
+    const {
+      storeHash,
+      productId: numericProductId,
+      categoryId: numericCategoryId,
+      hash,
+      scope,
+      traceId,
+      entityType,
+    } = webhook;
+
+    await persistWebhookLog(webhook, {
+      traceId,
+      storeHash,
+      eventHash: hash,
+      scope,
+      productId: numericProductId,
+      categoryId: numericCategoryId,
+      step: "store_lookup",
+      message: "Checking whether store is installed",
+    });
+
+    const user = await User.findOne({
+      store_hash: storeHash,
+      installStatus: "installed",
+    })
+      .select({ _id: 1 })
+      .lean();
+
+    if (!user) {
+      await persistWebhookEvent(webhook, {
+        storeId: webhook.payload?.store_id ? String(webhook.payload.store_id) : null,
+        status: "store_not_found",
+      });
+      await persistWebhookLog(webhook, {
+        traceId,
+        storeHash,
+        eventHash: hash,
+        scope,
+        productId: numericProductId,
+        categoryId: numericCategoryId,
+        logType: "warning",
+        step: "store_not_found",
+        message: "Webhook ignored because store is not installed",
+      });
+      return reply.status(200).send("OK");
+    }
+
+    if (entityType === "category") {
+      await trackCategoryWebhookBurst(storeHash, numericCategoryId, {
+        traceId,
+        eventHash: hash,
+        scope,
+      });
+    } else {
+      await trackProductWebhookBurst(storeHash, numericProductId, {
+        traceId,
+        eventHash: hash,
+        scope,
+      });
+    }
+
+    await persistWebhookEvent(webhook, {
+      storeId: webhook.payload?.store_id ? String(webhook.payload.store_id) : null,
+      status: "accepted",
+    });
+
+    await persistWebhookLog(webhook, {
+      traceId,
+      storeHash,
+      eventHash: hash,
+      scope,
+      productId: numericProductId,
+      categoryId: numericCategoryId,
+      step: "accepted",
+      message: "Webhook accepted and added to burst tracker",
+      meta: { entity_type: entityType },
+    });
+
+    console.log("[handleStoreWebhook] accepted", {
+      storeHash,
+      entityType,
+      productId: numericProductId,
+      categoryId: numericCategoryId,
+      scope,
+    });
+
+    return reply.status(200).send("OK");
+  } catch (error) {
+    if (webhook) {
+      await persistWebhookEvent(webhook, {
+        storeId: webhook.payload?.store_id ? String(webhook.payload.store_id) : null,
+        status: "failed",
+        errorMessage: error.message,
+      }).catch(() => {});
+      await persistWebhookLog(webhook, {
+        logType: "error",
+        step: "failed",
+        message: "Webhook handler failed",
+        meta: { error: error.message },
+      }).catch(() => {});
+    }
+
+    console.error("[handleStoreWebhook]", error.message);
+    return reply.status(200).send("OK");
   }
 };

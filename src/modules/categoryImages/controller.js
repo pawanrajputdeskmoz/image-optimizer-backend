@@ -1,6 +1,5 @@
 const crypto = require("node:crypto");
-const { User, CategoryImage, CategoryImageStatus } = require("../../models");
-const { performance } = require("perf_hooks");
+const { CategoryImage, CategoryImageStatus } = require("../../models");
 const config = require("../../config");
 const { parseChannelId, resolveChannelSiteUrl } = require("../../utils/channelContext");
 const {
@@ -17,27 +16,31 @@ const {
   getCategoryJobStatus,
   fetchAllCategoryImagesInChunks,
   fetchRestorableCategoriesForStore,
+  registerPendingCategoryImages,
 } = require("./services");
 const {
   fetchStoreOptimizationSettings,
 } = require("../imageOptimization/services");
 const { categoryImageQueue } = require("../../queue/categoryImageQueue");
+const { defaultWorkerJobOptions } = require("../../queue/workerJobOptions");
+const {
+  replyIfBulkOptimizationBlocked,
+  buildBulkQueuedMessage,
+  isFullBulkOptimizationJobType,
+} = require("../../utils/bulkOptimizationGuard");
+const {
+  replyIfBulkRestoreBlocked,
+  buildBulkRestoreQueuedMessage,
+} = require("../../utils/bulkRestoreGuard");
 const { categoryImageRestoreQueue } = require("../../queue/categoryImageRestoreQueue");
 
 function normalizeCategoryPagination(body = {}) {
-  const { page } = normalizePagination(body);
-  const rawLimit = parseInt(body.limit, 10);
-  const limit =
-    Number.isFinite(rawLimit) && rawLimit > 0
-      ? Math.min(250, rawLimit)
-      : Math.min(250, config.catalog.pageSize);
-
-  return { page, limit };
+  return normalizePagination(body, {
+    maxLimit: config.pagination.categoryMaxLimit,
+  });
 }
 
 exports.fetchAllCategories = async (req, reply) => {
-  const apiStart = performance.now();
-
   try {
     const body = req.body || {};
     const storeHash = req.storeHash;
@@ -71,12 +74,7 @@ exports.fetchAllCategories = async (req, reply) => {
         ? Number(rawTreeId)
         : null;
 
-    const user = await User.findOne(
-      { store_hash: storeHash },
-      { storeUrl: 1, access_token: 1, _id: 0 }
-    ).lean();
-
-    if (!user) {
+    if (!req.currentUser) {
       return reply.status(404).send({
         success: false,
         message: "Store is not installed",
@@ -96,10 +94,9 @@ exports.fetchAllCategories = async (req, reply) => {
       storeHash,
       channelId,
       accessToken,
-      user.storeUrl || null
+      req.currentUser.storeUrl || null
     );
 
-    const bcStart = performance.now();
     const result = await fetchCategoryImages({
       storeHash,
       accessToken,
@@ -110,16 +107,6 @@ exports.fetchAllCategories = async (req, reply) => {
       search,
       imageBaseUrl,
     });
-    const bcEnd = performance.now();
-
-    console.log(
-      `[BigCommerce API] category trees/categories ${(bcEnd - bcStart).toFixed(2)} ms`
-    );
-
-    const apiEnd = performance.now();
-    console.log(
-      `[fetchAllCategories] Total API Time: ${(apiEnd - apiStart).toFixed(2)} ms`
-    );
 
     return reply.status(200).send({
       success: true,
@@ -388,8 +375,6 @@ exports.restoreCategory = async (req, reply) => {
         ? Number(rawTreeId)
         : null;
 
-    console.log("[restoreCategory] START", { storeHash, channelId, categoryId, treeId });
-
     const result = await restoreCategoryImageSingle({
       storeHash,
       accessToken,
@@ -561,6 +546,14 @@ async function queueBulkCategoryJobs(req, reply, jobType, itemsOverride = null) 
     }
 
     const storeHash = req.storeHash;
+
+    if (
+      isFullBulkOptimizationJobType(jobType) &&
+      (await replyIfBulkOptimizationBlocked(reply, storeHash, "category"))
+    ) {
+      return;
+    }
+
     const accessToken = req.accessToken || req.currentUser?.access_token;
 
     if (!accessToken || !String(accessToken).trim()) {
@@ -699,6 +692,17 @@ async function queueBulkCategoryJobs(req, reply, jobType, itemsOverride = null) 
       });
     }
 
+    if (toQueue.length > 0) {
+      await registerPendingCategoryImages(
+        storeHash,
+        toQueue.map((entry) => ({
+          category_id: entry.categoryId,
+          channel_id: entry.channelId,
+          tree_id: entry.treeId,
+        }))
+      );
+    }
+
     // ── Write skip warning logs ─────────────────────────────────────────────
     if (skipped.length > 0) {
       const { error: skipLogError } = await writeCategorySkipLogs(
@@ -736,12 +740,7 @@ async function queueBulkCategoryJobs(req, reply, jobType, itemsOverride = null) 
             optimization_status: entry.optimization_status,
             settings,
           },
-          {
-            removeOnComplete: 200,
-            removeOnFail: 500,
-            attempts: 2,
-            backoff: { type: "exponential", delay: 5000 },
-          }
+          defaultWorkerJobOptions()
         )
       )
     );
@@ -784,8 +783,11 @@ async function queueBulkCategoryJobs(req, reply, jobType, itemsOverride = null) 
 
     return reply.status(202).send({
       success: true,
-      message: "Bulk category optimization queued",
-      data: responseData,
+      message: buildBulkQueuedMessage("category"),
+      data: {
+        ...responseData,
+        entity_type: "category",
+      },
     });
   } catch (error) {
     console.error("[queueBulkCategoryJobs] Error:", error);
@@ -814,6 +816,16 @@ async function queueBulkCategoryRestoreJobs(req, reply, jobType, itemsOverride =
     }
 
     const storeHash = req.storeHash;
+
+    // Full restore_bulk stays blocked if any restore/optimize is active.
+    // restore_checkbox mirrors checkBox optimize — overlapping checkbox restores allowed.
+    if (
+      jobType === "restore_bulk" &&
+      (await replyIfBulkRestoreBlocked(reply, storeHash, "category"))
+    ) {
+      return;
+    }
+
     const accessToken = req.accessToken || req.currentUser?.access_token;
 
     if (!accessToken || !String(accessToken).trim()) {
@@ -933,12 +945,7 @@ async function queueBulkCategoryRestoreJobs(req, reply, jobType, itemsOverride =
             treeId: entry.treeId,
             categoryId: entry.categoryId,
           },
-          {
-            removeOnComplete: 200,
-            removeOnFail: 500,
-            attempts: 2,
-            backoff: { type: "exponential", delay: 5000 },
-          }
+          defaultWorkerJobOptions()
         )
       )
     );
@@ -973,8 +980,11 @@ async function queueBulkCategoryRestoreJobs(req, reply, jobType, itemsOverride =
 
     return reply.status(202).send({
       success: true,
-      message: "Bulk category image restore queued",
-      data: responseData,
+      message: buildBulkRestoreQueuedMessage("category"),
+      data: {
+        ...responseData,
+        entity_type: "category",
+      },
     });
   } catch (error) {
     console.error("[queueBulkCategoryRestoreJobs] Error:", error);
