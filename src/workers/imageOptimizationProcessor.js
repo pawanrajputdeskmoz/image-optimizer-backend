@@ -95,19 +95,31 @@ async function processSingleImageOptimization({
     }
   }
 
+  // Filename/alt templates must still apply to already-optimized images
+  // (compressImage runs a metadata-only update), so "optimized" doesn't block.
+  const metadataTemplatesOn = Boolean(
+    settings?.is_filename_template_enabled ||
+      settings?.is_alt_text_template_enabled
+  );
+
   if (!forceReoptimize) {
     const clientStatus = String(optimization_status || "").toLowerCase();
-    const alreadyOptimizedOnClient = ["optimized", "optimizing"].includes(
+    const clientBlockingStatuses = metadataTemplatesOn
+      ? ["optimizing"]
+      : ["optimized", "optimizing"];
+    const alreadyOptimizedOnClient = clientBlockingStatuses.includes(
       clientStatus
     );
-    const { skip, reason } = await shouldSkipImageOptimization(
+    const { skip, code: skipCode, reason } = await shouldSkipImageOptimization(
       storeHash,
       productId,
       imageId,
       { accessToken, forceReoptimize }
     );
+    const skipBlocks =
+      skip && !(metadataTemplatesOn && skipCode === "optimized");
 
-    if (skip || alreadyOptimizedOnClient) {
+    if (skipBlocks || alreadyOptimizedOnClient) {
       const skipMessage =
         reason || "Image is already optimized or currently optimizing";
 

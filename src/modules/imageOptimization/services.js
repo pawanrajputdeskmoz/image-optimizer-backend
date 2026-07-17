@@ -507,8 +507,14 @@ const MANUAL_SKIP_STATUSES = new Set(["optimized", "optimizing"]);
 /**
  * Image IDs that should not be queued again (already done or in progress).
  * Accepts image id numbers or job items `{ product_id, image_id }`.
+ * Pass `statuses` to narrow the blocking set (e.g. only "optimizing"/"pending"
+ * when metadata templates should still run on already-optimized images).
  */
-exports.getAlreadyOptimizedImageIdSet = async (storeHash, imageIdsOrItems = []) => {
+exports.getAlreadyOptimizedImageIdSet = async (
+  storeHash,
+  imageIdsOrItems = [],
+  statuses = null
+) => {
   const imageIds = new Set();
   const productIds = new Set();
 
@@ -529,7 +535,11 @@ exports.getAlreadyOptimizedImageIdSet = async (storeHash, imageIdsOrItems = []) 
     return skipIds;
   }
 
-  const statusFilter = { $in: Array.from(SKIP_QUEUE_STATUSES) };
+  const statusFilter = {
+    $in: Array.isArray(statuses) && statuses.length > 0
+      ? statuses
+      : Array.from(SKIP_QUEUE_STATUSES),
+  };
   const queries = [];
 
   if (imageIds.size > 0) {
@@ -609,12 +619,13 @@ exports.shouldSkipImageOptimization = async (
   ]);
 
   if (statusRow) {
+    const optimizing = statusRow.status === "optimizing";
     return {
       skip: true,
-      reason:
-        statusRow.status === "optimizing"
-          ? "Image is currently being optimized. Please wait for the current optimization job to finish."
-          : "Image is already optimized",
+      code: optimizing ? "optimizing" : "optimized",
+      reason: optimizing
+        ? "Image is currently being optimized. Please wait for the current optimization job to finish."
+        : "Image is already optimized",
     };
   }
 
@@ -636,6 +647,7 @@ exports.shouldSkipImageOptimization = async (
       if (!existsOnBc) {
         return {
           skip: true,
+          code: "not_on_bc",
           reason:
             "Image not found on BigCommerce (already replaced or deleted)",
         };
@@ -937,6 +949,9 @@ exports.streamCatalogFetchToJobItems = async ({
   storeUrl,
   pageSize = config.catalog.pageSize,
   skipOptimized = true,
+  /** When true (filename/alt templates on), already-optimized images are still
+   *  queued so the worker can apply metadata; optimizing/pending stay skipped. */
+  includeOptimized = false,
   batchSize = getOptimizationBatchSize(),
 }) => {
   if (!jobUuid || !storeHash) {
@@ -1039,7 +1054,11 @@ exports.streamCatalogFetchToJobItems = async ({
         const statusRows = await ImageStatus.find({
           store_hash: storeHash,
           image_id: { $in: imageIds },
-          status: { $in: Array.from(SKIP_QUEUE_STATUSES) },
+          status: {
+            $in: includeOptimized
+              ? ["optimizing", "pending"]
+              : Array.from(SKIP_QUEUE_STATUSES),
+          },
         })
           .select({ image_id: 1 })
           .lean();
@@ -2202,8 +2221,9 @@ exports.recordOptimizationJobImageResult = async ({
     await Promise.all(logWrites);
 
     // Consume one dashboard pending slot when a queued optimize item finishes
-    // (success or fail). Worker "already optimized" skips were never registered.
-    if (!skipped && job.store_hash) {
+    // (success or fail). Worker "already optimized" skips and metadata-only
+    // updates were never registered as pending.
+    if (!skipped && !metadataOnly && job.store_hash) {
       await StoreImageStat.updateOne(
         { store_hash: job.store_hash },
         { $inc: { pending_images: -1 } }

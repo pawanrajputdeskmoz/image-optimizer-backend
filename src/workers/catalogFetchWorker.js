@@ -51,6 +51,12 @@ async function startWorker() {
         storeHash,
         accessToken,
         storeUrl,
+        // Filename/alt templates must still apply to already-optimized images
+        // (worker runs a metadata-only update for them).
+        includeOptimized: Boolean(
+          settings?.is_filename_template_enabled ||
+            settings?.is_alt_text_template_enabled
+        ),
       });
 
       if (catalogError) {

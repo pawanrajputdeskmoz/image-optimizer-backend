@@ -359,67 +359,35 @@ function resolveOutputFormat(formatOption, inputFormat, hasAlpha = false) {
   return normalizeFormat(requested) || config.image.outputFormat;
 }
 
-/** Encode presets: strip bloat, no mozjpeg/sharpen, ~1% loss at store quality. */
+/**
+ * Encode presets: mozjpeg/webp/png still give strong compression at these
+ * settings, but skip the extra trellis/overshoot/high-effort passes that
+ * cost multiple seconds of CPU per image for very little extra size gain.
+ */
 function applySharpFormat(pipeline, format, quality) {
   switch (format) {
     case "jpeg":
     case "jpg":
       return pipeline.jpeg({
-        // quality,
-        // progressive: true,
-        // mozjpeg: true,
-        // optimiseCoding: true , 
-        // chromaSubsampling: "4:2:0"
-
-        quality: 82,
-
+        quality,
         mozjpeg: true,
-      
         progressive: true,
-      
         chromaSubsampling: "4:2:0",
-      
-        optimizeCoding: true,
-      
-        trellisQuantisation: true,
-      
-        overshootDeringing: true,
-      
-        optimizeScans: true,
-      
-        quantizationTable: 3
       });
 
     case "png":
       return pipeline.png({
-        // compressionLevel: 9,
-        // progressive: true,
-        // palette: true,
-        // quality: 80,
-        // effort: 10,
-
-        compressionLevel: 9,
-
-        adaptiveFiltering: true,
-      
-        effort: 10,
-      
-        quality: 80,
-      
-        palette: true
+        compressionLevel: 7,
+        effort: 5,
+        quality,
+        palette: true,
       });
 
     case "webp":
       return pipeline.webp({
-        quality: 80,
-        effort: 6,
-        smartSubsample: true
-
-        // quality: 80,
-        // effort: 6,
-        // smartSubsample: true,
-        // nearLossless: false,
-        // alphaQuality: 80,
+        quality,
+        effort: 4,
+        smartSubsample: true,
       });
 
     case "avif":
@@ -436,8 +404,8 @@ function applySharpFormat(pipeline, format, quality) {
         quality,
         progressive: true,
         mozjpeg: true,
-        optimiseCoding: true , 
-        chromaSubsampling: "4:2:0"
+        optimiseCoding: true,
+        chromaSubsampling: "4:2:0",
       });
   }
 }
@@ -496,38 +464,20 @@ async function encodeWithSharp(originalSRC, { format, quality, meta: metaIn }) {
   return { data, info, outputFormat, meta };
 }
 
-/** Try encode; step quality down slightly until file is smaller than original. */
-async function encodeForSmallerFile(originalSRC, options, originalSize) {
+/**
+ * Single encode pass at the resolved quality. If the result isn't smaller
+ * than the original, optimizeImage() already falls back to the original
+ * bytes, so we skip the extra step-down re-encode passes to save time.
+ */
+async function encodeForSmallerFile(originalSRC, options) {
   const baseQuality = resolveEncodeQuality(options.quality);
-  const attempts = [
-    baseQuality,
-    Math.max(75, baseQuality - 4),
-    Math.max(70, baseQuality - 8),
-  ];
-  const seen = new Set();
-
-  for (const quality of attempts) {
-    if (seen.has(quality)) continue;
-    seen.add(quality);
-
-    const result = await encodeWithSharp(originalSRC, {
-      format: options.format,
-      quality,
-      meta: options.meta,
-    });
-
-    if (result.data.length < originalSize) {
-      return { ...result, encodeQuality: quality };
-    }
-  }
-
-  const last = await encodeWithSharp(originalSRC, {
+  const result = await encodeWithSharp(originalSRC, {
     format: options.format,
     quality: baseQuality,
     meta: options.meta,
   });
 
-  return { ...last, encodeQuality: baseQuality };
+  return { ...result, encodeQuality: baseQuality };
 }
 
 async function loadOriginalBytes(originalSRC, meta) {
@@ -599,7 +549,8 @@ exports.optimizeImage = async (originalSRC, options = {}) => {
     const encodeQuality = resolveEncodeQuality(options.quality);
     const originalStat = await fs.stat(originalSRC);
     const originalSize = originalStat.size;
-    const meta = await sharp(originalSRC, { failOn: "none" }).metadata();
+    const meta =
+      options.meta || (await sharp(originalSRC, { failOn: "none" }).metadata());
 
     const originalStats = {
       width: meta.width,
@@ -613,11 +564,11 @@ exports.optimizeImage = async (originalSRC, options = {}) => {
       info,
       outputFormat,
       encodeQuality: usedEncodeQuality,
-    } = await encodeForSmallerFile(
-      originalSRC,
-      { format: options.format, quality: options.quality, meta },
-      originalSize
-    );
+    } = await encodeForSmallerFile(originalSRC, {
+      format: options.format,
+      quality: options.quality,
+      meta,
+    });
 
     let data = encoded;
     let optimizedInfo = info;

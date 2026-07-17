@@ -77,11 +77,11 @@ module.exports = {
     ),
     optimizationHeavyConcurrency: envInt(
       "IMAGE_OPTIMIZATION_HEAVY_WORKER_CONCURRENCY",
-      2
+      4
     ),
     optimizationStandardConcurrency: envInt(
       "IMAGE_OPTIMIZATION_STANDARD_WORKER_CONCURRENCY",
-      2
+      4
     ),
     restoreConcurrency: envInt("IMAGE_RESTORE_WORKER_CONCURRENCY", 2),
     restoreHeavyConcurrency: envInt("IMAGE_RESTORE_HEAVY_WORKER_CONCURRENCY", 2),

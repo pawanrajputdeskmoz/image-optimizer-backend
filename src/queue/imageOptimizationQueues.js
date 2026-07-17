@@ -237,6 +237,13 @@ async function addOptimizationBatchJob(data, options = {}, routing = {}) {
       if (isPendingQueueState(state)) {
         return { bullJob: existing, tier, queueName, duplicate: true };
       }
+      // failed/completed jobs keep the same id and would make the add below a
+      // silent no-op — remove them so the batch can be re-dispatched (resume).
+      try {
+        await existing.remove();
+      } catch (_) {
+        /* ignore remove races */
+      }
     }
   }
 

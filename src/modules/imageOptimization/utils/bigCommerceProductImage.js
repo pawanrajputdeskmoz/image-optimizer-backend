@@ -307,7 +307,9 @@ async function verifyImageReplacement({
 }
 
 /**
- * Upload optimized image, preserve thumbnail, delete old image, verify on BC.
+ * Upload optimized image, preserve thumbnail, delete old image.
+ * Verification polling is skipped on the hot path (it only fed logs and
+ * could add multiple seconds of BC list GETs + sleeps).
  */
 async function replaceProductImage({
   storeHash,
@@ -320,7 +322,7 @@ async function replaceProductImage({
   sortOrder,
   isThumbnail,
   verifyPollIntervalMs = 400,
-  verifyMaxRetries = 3,
+  verifyMaxRetries = 0,
 }) {
   const existingImages = await fetchProductImages({
     storeHash,
@@ -343,6 +345,12 @@ async function replaceProductImage({
     };
   }
 
+  const shouldKeepThumbnail =
+    isThumbnail != null
+      ? Boolean(isThumbnail)
+      : Boolean(oldImage?.is_thumbnail);
+
+  // Set thumbnail on upload when needed so we can skip a follow-up PUT.
   const uploadResult = await uploadProductImage({
     storeHash,
     productId,
@@ -351,7 +359,7 @@ async function replaceProductImage({
     fileName,
     description,
     sortOrder,
-    isThumbnail: false,
+    isThumbnail: shouldKeepThumbnail,
     forceEmptyDescription: !normalizeUploadDescription(description),
   });
 
@@ -362,65 +370,41 @@ async function replaceProductImage({
     throw new Error("Failed to upload optimized image to BigCommerce");
   }
 
-  const shouldKeepThumbnail =
-    isThumbnail != null
-      ? Boolean(isThumbnail)
-      : Boolean(oldImage?.is_thumbnail);
-
-  const normalizedDescription = normalizeUploadDescription(description);
-  const metadataUpdate = {};
-  if (normalizedDescription) {
-    metadataUpdate.description = normalizedDescription;
-  } else {
-    metadataUpdate.clearDescription = true;
-  }
-  if (sortOrder != null && sortOrder !== "") {
-    metadataUpdate.sortOrder = sortOrder;
-  }
-  if (shouldKeepThumbnail) {
-    metadataUpdate.isThumbnail = true;
-  }
-
-  if (Object.keys(metadataUpdate).length > 0) {
-    await updateProductImageMetadata({
-      storeHash,
-      productId,
-      imageId: newImageId,
-      accessToken,
-      ...metadataUpdate,
-    });
-  }
-
-  const syncResult = await syncProductImageDescription({
-    storeHash,
-    productId,
-    imageId: newImageId,
-    accessToken,
-    description: normalizedDescription,
-    sortOrder,
-    isThumbnail: shouldKeepThumbnail ? true : isThumbnail,
-  });
-
-  if (!syncResult.ok) {
-    console.warn("[replaceProductImage] description sync failed:", syncResult.error);
-  }
-
-  await deleteProductImage({
+  // Fire-and-forget: nothing downstream consumes the delete result, so don't
+  // block the response on it. One delayed retry covers transient BC errors
+  // (deleteProductImage already treats 404 as success).
+  deleteProductImage({
     storeHash,
     productId,
     imageId: oldImageId,
     accessToken,
-  });
+  })
+    .catch(() =>
+      sleep(1500).then(() =>
+        deleteProductImage({ storeHash, productId, imageId: oldImageId, accessToken })
+      )
+    )
+    .catch((err) => {
+      console.error("[replaceProductImage] old image delete failed", {
+        storeHash,
+        productId,
+        oldImageId,
+        error: err?.message,
+      });
+    });
 
-  const verification = await verifyImageReplacement({
-    storeHash,
-    productId,
-    oldImageId,
-    newImageId,
-    accessToken,
-    pollIntervalMs: verifyPollIntervalMs,
-    maxRetries: verifyMaxRetries,
-  });
+  let verification = { verified: true, attempts: 0, skipped: true };
+  if (verifyMaxRetries > 0) {
+    verification = await verifyImageReplacement({
+      storeHash,
+      productId,
+      oldImageId,
+      newImageId,
+      accessToken,
+      pollIntervalMs: verifyPollIntervalMs,
+      maxRetries: verifyMaxRetries,
+    });
+  }
 
   return {
     oldImage,

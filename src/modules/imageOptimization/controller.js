@@ -656,6 +656,10 @@ exports.singleImageOptimization = async (req, reply) => {
       body.force_reoptimize === true ||
       body.reoptimize === true;
 
+    // Filename/alt templates must still apply to already-optimized images
+    // (metadata-only update), so "optimized" doesn't block when they're on.
+    const metadataTemplatesOn = runFilename || runAltText;
+
     if (!forceReoptimize) {
       const clientStatus = String(
         body.optimization_status || body.status || ""
@@ -666,18 +670,23 @@ exports.singleImageOptimization = async (req, reply) => {
             : clientStatus === "optimized"
               ? "Image is already optimized"
               : null;
-      const alreadyOptimizedOnClient = ["optimized", "optimizing"].includes(
+      const clientBlockingStatuses = metadataTemplatesOn
+        ? ["optimizing"]
+        : ["optimized", "optimizing"];
+      const alreadyOptimizedOnClient = clientBlockingStatuses.includes(
         clientStatus
       );
 
-      const { skip, reason } = await shouldSkipImageOptimization(
+      const { skip, code: skipCode, reason } = await shouldSkipImageOptimization(
         storeHash,
         productId,
         imageId,
         { accessToken, forceReoptimize }
       );
+      const skipBlocks =
+        skip && !(metadataTemplatesOn && skipCode === "optimized");
 
-      if (skip || alreadyOptimizedOnClient) {
+      if (skipBlocks || alreadyOptimizedOnClient) {
         return reply.status(200).send({
           success: true,
           skipped: true,
@@ -883,11 +892,17 @@ exports.singleImageOptimization = async (req, reply) => {
         runAltText,
         ...placement,
       },
-      logContext: null
+      logContext: null,
+      // Quota already checked above via canOptimizeImages — skip the
+      // duplicate User + quota lookup inside compressImage.
+      skipQuotaCheck: true,
     });
 
     // Single optimize has no job-item record step — consume pending here.
-    await adjustPendingImages(storeHash, -1);
+    // Metadata-only runs never registered a pending image, so don't decrement.
+    if (!result?.data?.metadataOnly) {
+      await adjustPendingImages(storeHash, -1);
+    }
 
     if (!result.success) {
       if (result.plan_limit) {
@@ -1505,9 +1520,19 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
       req.body?.force_reoptimize === true ||
       req.body?.reoptimize === true;
 
+    // Filename/alt templates must still apply to already-optimized images
+    // (worker runs a metadata-only update), so only optimizing/pending block.
+    const metadataTemplatesOn = Boolean(
+      settings.is_filename_template_enabled ||
+        settings.is_alt_text_template_enabled
+    );
+    const blockingStatuses = metadataTemplatesOn
+      ? ["optimizing", "pending"]
+      : null;
+
     const skipOptimizedIds = forceReoptimize
       ? new Set()
-      : await getAlreadyOptimizedImageIdSet(storeHash, items);
+      : await getAlreadyOptimizedImageIdSet(storeHash, items, blockingStatuses);
 
     for (let index = 0; index < items.length; index++) {
       const item = items[index] || {};
@@ -1569,7 +1594,10 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
       const clientStatus = String(
         item.optimization_status || item.status || ""
       ).toLowerCase();
-      const alreadyOptimizedOnClient = ["optimized", "optimizing", "pending"].includes(
+      const clientBlockingStatuses = metadataTemplatesOn
+        ? ["optimizing", "pending"]
+        : ["optimized", "optimizing", "pending"];
+      const alreadyOptimizedOnClient = clientBlockingStatuses.includes(
         clientStatus
       );
 
