@@ -34,6 +34,8 @@ async function startWorker() {
     async (job) => {
       const {
         jobUuid,
+        userId = null,
+        jobId = null,
         job_type: jobType = "restore_checkbox",
         storeHash,
         accessToken,
@@ -56,6 +58,8 @@ async function startWorker() {
         if (statusError) {
           console.error("[category-image-restore-worker] set restoring status:", statusError);
           await appendCategoryImageLog({
+            userId,
+            jobId,
             jobUuid,
             storeHash,
             channelId,
@@ -163,6 +167,8 @@ async function startWorker() {
     const data = job?.data;
     if (data?.storeHash && data?.categoryId != null) {
       await appendCategoryImageLog({
+        userId: data.userId,
+        jobId: data.jobId,
         jobUuid: data.jobUuid,
         storeHash: data.storeHash,
         channelId: data.channelId || 1,

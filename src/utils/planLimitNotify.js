@@ -20,15 +20,6 @@ async function notifyPlanLimitReached(storeHash, payload = {}) {
   }
 
   const yearMonth = getYearMonth();
-  const existing = await PlanLimitNotification.findOne({
-    store_hash: storeHash,
-    year_month: yearMonth,
-  }).lean();
-
-  if (existing) {
-    return { sent: false, duplicate: true, error: null };
-  }
-
   const user = await User.findOne({ store_hash: storeHash, installStatus: "installed" })
     .select({ email: 1, store_name: 1 })
     .lean();
@@ -37,12 +28,23 @@ async function notifyPlanLimitReached(storeHash, payload = {}) {
     payload.message ||
     "Your monthly image optimization limit has been reached. Please wait until next month or upgrade your plan, then try again.";
 
-  await PlanLimitNotification.create({
-    store_hash: storeHash,
-    year_month: yearMonth,
-    email: user?.email || null,
-    message,
-  });
+  const result = await PlanLimitNotification.updateOne(
+    { store_hash: storeHash, year_month: yearMonth },
+    {
+      $setOnInsert: {
+        user_id: user?._id || null,
+        store_hash: storeHash,
+        year_month: yearMonth,
+        email: user?.email || null,
+        message,
+      },
+    },
+    { upsert: true }
+  );
+
+  if (!result.upsertedCount) {
+    return { sent: false, duplicate: true, error: null };
+  }
 
   console.log("[plan-limit-notify]", {
     store_hash: storeHash,

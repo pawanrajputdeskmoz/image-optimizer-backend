@@ -417,6 +417,7 @@ exports.buildJobImageMeta = async ({
   settings,
   storeOptions = {},
   productContextCache = null,
+  savedImageDataMap = null,
   placementOverrides = {},
 }) => {
   const runFilename = Boolean(settings?.is_filename_template_enabled);
@@ -460,13 +461,17 @@ exports.buildJobImageMeta = async ({
     }
   }
 
-  const savedFromDb = await ImageOldData.findOne({
-    store_hash: storeHash,
-    product_id: Number(productId),
-    image_id: Number(imageId),
-  })
-    .select({ imageName: 1, altText: 1, newImageName: 1, newAltText: 1 })
-    .lean();
+  const savedKey = `${Number(productId)}:${Number(imageId)}`;
+  const savedFromDb =
+    savedImageDataMap instanceof Map
+      ? savedImageDataMap.get(savedKey) || null
+      : await ImageOldData.findOne({
+          store_hash: storeHash,
+          product_id: Number(productId),
+          image_id: Number(imageId),
+        })
+          .select({ imageName: 1, altText: 1, newImageName: 1, newAltText: 1 })
+          .lean();
 
   const placement = exports.resolveImagePlacementFields({
     ...(bcImage || {}),
@@ -584,7 +589,13 @@ exports.shouldSkipImageOptimization = async (
   imageId,
   options = {}
 ) => {
-  const { accessToken = null, forceReoptimize = false } = options;
+  const {
+    accessToken = null,
+    forceReoptimize = false,
+    usePrefetched = false,
+    prefetchedStatusRow = null,
+    prefetchedOptimizationRow = null,
+  } = options;
   const iid = Number(imageId);
   if (!storeHash || !Number.isFinite(iid)) {
     return { skip: false, reason: null };
@@ -613,10 +624,12 @@ exports.shouldSkipImageOptimization = async (
     optimizationQuery.product_id = pid;
   }
 
-  const [statusRow, optimizationRow] = await Promise.all([
-    ImageStatus.findOne(statusQuery).select({ status: 1 }).lean(),
-    ImageOptimization.findOne(optimizationQuery).select({ _id: 1 }).lean(),
-  ]);
+  const [statusRow, optimizationRow] = usePrefetched
+    ? [prefetchedStatusRow, prefetchedOptimizationRow]
+    : await Promise.all([
+        ImageStatus.findOne(statusQuery).select({ status: 1 }).lean(),
+        ImageOptimization.findOne(optimizationQuery).select({ _id: 1 }).lean(),
+      ]);
 
   if (statusRow) {
     const optimizing = statusRow.status === "optimizing";
@@ -944,6 +957,8 @@ exports.getOptimizationBatchCount = (queuedCount, batchSize = null) => {
  */
 exports.streamCatalogFetchToJobItems = async ({
   jobUuid,
+  userId = null,
+  jobId = null,
   storeHash,
   accessToken,
   storeUrl,
@@ -990,7 +1005,14 @@ exports.streamCatalogFetchToJobItems = async ({
 
   const flushBatch = async () => {
     if (pendingBatch.length === 0) return;
-    await ImageJobItem.insertMany(pendingBatch, { ordered: false }).catch(() => {});
+    await ImageJobItem.insertMany(
+      pendingBatch.map((item) => ({
+        ...item,
+        user_id: userId,
+        job_id: jobId,
+      })),
+      { ordered: false }
+    ).catch(() => {});
     pendingBatch = [];
     batchIndex += 1;
   };
@@ -1115,7 +1137,7 @@ exports.streamCatalogFetchToJobItems = async ({
 
     await flushBatch();
 
-    await registerPendingProductImages(storeHash, discoveredForStats);
+    await registerPendingProductImages(storeHash, discoveredForStats, userId);
 
     return {
       error: null,
@@ -1486,7 +1508,7 @@ const SKIP_PENDING_STATUSES = new Set(["optimized", "optimizing", "pending"]);
  * Bulk/single queue: mark images pending for store dashboard.
  * Skips already optimized, optimizing, or already-pending images.
  */
-async function registerPendingProductImages(storeHash, images = []) {
+async function registerPendingProductImages(storeHash, images = [], userId = null) {
   if (!storeHash || !images.length) return { registered: 0, error: null };
 
   const normalized = [];
@@ -1533,7 +1555,11 @@ async function registerPendingProductImages(storeHash, images = []) {
           image_id: row.imageId,
         },
         update: {
-          $set: { status: "pending", image_update_status: "pending" },
+          $set: {
+            ...(userId ? { user_id: userId } : {}),
+            status: "pending",
+            image_update_status: "pending",
+          },
           $setOnInsert: {
             store_hash: storeHash,
             product_id: row.productId,
@@ -1554,6 +1580,7 @@ async function registerPendingProductImages(storeHash, images = []) {
         { store_hash: storeHash },
         {
           $inc: { pending_images: registered },
+          ...(userId ? { $set: { user_id: userId } } : {}),
           $setOnInsert: { store_hash: storeHash },
         },
         { upsert: true }
@@ -1787,6 +1814,7 @@ async function resolveStoreHashForJobRecord(
 exports.appendImageLog = appendImageLog;
 
 exports.createBulkOptimizationJob = async ({
+  userId = null,
   storeHash,
   jobType,
   totalImages,
@@ -1807,6 +1835,7 @@ exports.createBulkOptimizationJob = async ({
 
   try {
     const doc = await ImageJob.create({
+      user_id: userId,
       job_uuid: jobUuid,
       store_hash: storeHash,
       job_type: validJobType,
@@ -1826,11 +1855,22 @@ exports.createBulkOptimizationJob = async ({
     const writes = [];
 
     if (jobItems.length > 0) {
-      writes.push(ImageJobItem.insertMany(jobItems, { ordered: false }));
+      writes.push(
+        ImageJobItem.insertMany(
+          jobItems.map((item) => ({
+            ...item,
+            user_id: userId,
+            job_id: doc._id,
+          })),
+          { ordered: false }
+        )
+      );
     }
 
     writes.push(
       ImageOptimizationLog.create({
+        user_id: userId,
+        job_id: doc._id,
         job_uuid: jobUuid,
         store_hash: storeHash,
         job_type: validJobType,
@@ -1849,7 +1889,7 @@ exports.createBulkOptimizationJob = async ({
 
     const queuedItems = jobItems.filter((row) => row.status === "queued");
     if (queuedItems.length > 0) {
-      await registerPendingProductImages(storeHash, queuedItems);
+      await registerPendingProductImages(storeHash, queuedItems, userId);
     }
 
     return { error: null, jobUuid, doc };
@@ -1865,6 +1905,8 @@ exports.createBulkOptimizationJob = async ({
  */
 exports.updateJobAfterCatalogFetch = async ({
   jobUuid,
+  userId = null,
+  jobId = null,
   storeHash,
   totalImages,
   queuedImages,
@@ -1899,6 +1941,8 @@ exports.updateJobAfterCatalogFetch = async ({
     }
 
     await ImageOptimizationLog.create({
+      user_id: userId,
+      job_id: jobId,
       job_uuid: jobUuid,
       store_hash: storeHash,
       job_type: "bulk",
@@ -1985,13 +2029,22 @@ exports.setJobItemStatus = async ({
   }
 };
 
-exports.getOptimizationJobStatus = async (jobUuid, storeHash) => {
+exports.getOptimizationJobStatus = async (jobUuid, storeHash, options = {}) => {
   const query = { job_uuid: jobUuid };
   const logQuery = { job_uuid: jobUuid };
+  const itemQuery = { job_uuid: jobUuid };
   if (storeHash) {
     query.store_hash = storeHash;
     logQuery.store_hash = storeHash;
+    itemQuery.store_hash = storeHash;
   }
+  const itemLimit = Math.min(500, Math.max(1, Number(options.itemLimit) || 100));
+  const itemPage = Math.max(1, Number(options.itemPage) || 1);
+  const itemAfter =
+    /^[a-f\d]{24}$/i.test(String(options.itemAfter || ""))
+      ? String(options.itemAfter)
+      : null;
+  if (itemAfter) itemQuery._id = { $gt: itemAfter };
 
   const [job, logs, items] = await Promise.all([
     ImageJob.findOne(query).lean(),
@@ -1999,7 +2052,11 @@ exports.getOptimizationJobStatus = async (jobUuid, storeHash) => {
       .sort({ created_at: -1 })
       .limit(200)
       .lean(),
-    ImageJobItem.find({ job_uuid: jobUuid }).sort({ created_at: 1 }).lean(),
+    ImageJobItem.find(itemQuery)
+      .sort({ _id: 1 })
+      .skip(itemAfter ? 0 : (itemPage - 1) * itemLimit)
+      .limit(itemLimit)
+      .lean(),
   ]);
 
   if (!job) {
@@ -2035,6 +2092,13 @@ exports.getOptimizationJobStatus = async (jobUuid, storeHash) => {
     },
     logs,
     items,
+    items_pagination: {
+      page: itemPage,
+      limit: itemLimit,
+      total: Number(job.total_images) || 0,
+      next_cursor:
+        items.length === itemLimit ? String(items[items.length - 1]._id) : null,
+    },
     plan_limit,
   };
 };
@@ -2239,6 +2303,7 @@ exports.recordOptimizationJobImageResult = async ({
 };
 
 exports.createRestoreJob = async ({
+  userId = null,
   storeHash,
   jobType,
   totalImages,
@@ -2258,6 +2323,7 @@ exports.createRestoreJob = async ({
 
   try {
     const doc = await ImageJob.create({
+      user_id: userId,
       job_uuid: jobUuid,
       store_hash: storeHash,
       job_type: validJobType,
@@ -2275,11 +2341,22 @@ exports.createRestoreJob = async ({
     const writes = [];
 
     if (jobItems.length > 0) {
-      writes.push(ImageJobItem.insertMany(jobItems, { ordered: false }));
+      writes.push(
+        ImageJobItem.insertMany(
+          jobItems.map((item) => ({
+            ...item,
+            user_id: userId,
+            job_id: doc._id,
+          })),
+          { ordered: false }
+        )
+      );
     }
 
     writes.push(
       ImageOptimizationLog.create({
+        user_id: userId,
+        job_id: doc._id,
         job_uuid: jobUuid,
         store_hash: storeHash,
         job_type: validJobType,
@@ -2907,6 +2984,7 @@ exports.classifyRestoreChunkItems = async (storeHash, items, { indexOffset = 0 }
 
 exports.createRestoreJobPlaceholder = async ({
   jobUuid = crypto.randomUUID(),
+  userId = null,
   storeHash,
   jobType,
 }) => {
@@ -2919,7 +2997,8 @@ exports.createRestoreJobPlaceholder = async ({
   }
 
   try {
-    await ImageJob.create({
+    const doc = await ImageJob.create({
+      user_id: userId,
       job_uuid: jobUuid,
       store_hash: storeHash,
       job_type: validJobType,
@@ -2934,6 +3013,8 @@ exports.createRestoreJobPlaceholder = async ({
     });
 
     await ImageOptimizationLog.create({
+      user_id: userId,
+      job_id: doc._id,
       job_uuid: jobUuid,
       store_hash: storeHash,
       job_type: validJobType,
@@ -2943,7 +3024,7 @@ exports.createRestoreJobPlaceholder = async ({
       meta: { mode: "chunked" },
     });
 
-    return { error: null, jobUuid };
+    return { error: null, jobUuid, doc };
   } catch (err) {
     return { error: err.message, jobUuid: null };
   }
@@ -2951,6 +3032,8 @@ exports.createRestoreJobPlaceholder = async ({
 
 exports.updateRestoreJobAfterScan = async ({
   jobUuid,
+  userId = null,
+  jobId = null,
   storeHash,
   jobType,
   totalImages,
@@ -2979,6 +3062,8 @@ exports.updateRestoreJobAfterScan = async ({
     await ImageJob.updateOne({ job_uuid: jobUuid }, { $set });
 
     await ImageOptimizationLog.create({
+      user_id: userId,
+      job_id: jobId,
       job_uuid: jobUuid,
       store_hash: storeHash,
       job_type: jobType,
@@ -3004,6 +3089,8 @@ exports.queueRestoreWorkerJobsBatch = async (
   toQueue,
   {
     jobUuid,
+    userId = null,
+    jobId = null,
     jobType,
     storeHash,
     storeUrl,
@@ -3029,6 +3116,8 @@ exports.queueRestoreWorkerJobsBatch = async (
       "restore-image",
       {
         jobUuid,
+        userId,
+        jobId,
         job_type: jobType,
         storeHash,
         storeUrl,
@@ -3050,6 +3139,8 @@ exports.queueRestoreWorkerJobsBatch = async (
 
 exports.runRestoreImageJob = async ({
   jobUuid,
+  userId = null,
+  jobId = null,
   jobType,
   storeHash,
   storeUrl,
@@ -3062,7 +3153,7 @@ exports.runRestoreImageJob = async ({
 }) => {
   const isLastAttempt = attemptsMade + 1 >= maxAttempts;
   const logContext = jobUuid
-    ? { jobUuid, storeHash, jobType, productId, imageId }
+    ? { userId, jobId, jobUuid, storeHash, jobType, productId, imageId }
     : null;
 
   if (jobUuid) {
@@ -3075,6 +3166,8 @@ exports.runRestoreImageJob = async ({
 
     if (statusError) {
       await appendImageLog({
+        userId,
+        jobId,
         jobUuid,
         storeHash,
         jobType,
@@ -3162,6 +3255,8 @@ exports.runRestoreImageJob = async ({
 
 exports.processRestoreChunkJob = async ({
   jobUuid,
+  userId = null,
+  jobId = null,
   jobType,
   storeHash,
   storeUrl,
@@ -3180,6 +3275,8 @@ exports.processRestoreChunkJob = async ({
       try {
         const result = await exports.runRestoreImageJob({
           jobUuid,
+          userId,
+          jobId,
           jobType,
           storeHash,
           storeUrl,
@@ -3204,6 +3301,8 @@ exports.processRestoreChunkJob = async ({
         if (attempt >= itemMaxAttempts - 1) {
           summary.failed += 1;
           await appendImageLog({
+            userId,
+            jobId,
             jobUuid,
             storeHash,
             jobType,
@@ -3228,6 +3327,8 @@ exports.processRestoreChunkJob = async ({
  */
 exports.processBulkRestoreFromStore = async ({
   jobUuid,
+  userId = null,
+  jobId = null,
   storeHash,
   storeUrl,
   accessToken,
@@ -3261,6 +3362,8 @@ exports.processBulkRestoreFromStore = async ({
 
         const stampedJobItems = jobItems.map((row) => ({
           ...row,
+          user_id: userId,
+          job_id: jobId,
           job_uuid: jobUuid,
           job_type: jobType,
         }));
@@ -3271,6 +3374,8 @@ exports.processBulkRestoreFromStore = async ({
 
         const queuedJobs = await exports.queueRestoreWorkerJobsBatch(toQueue, {
           jobUuid,
+          userId,
+          jobId,
           jobType,
           storeHash,
           storeUrl,
@@ -3285,6 +3390,8 @@ exports.processBulkRestoreFromStore = async ({
         if (skipped.length > 0) {
           await exports.writeRestoreLogs(
             skipped.map((skip) => ({
+              user_id: userId,
+              job_id: jobId,
               job_uuid: jobUuid,
               store_hash: storeHash,
               job_type: jobType,
@@ -3320,6 +3427,8 @@ exports.processBulkRestoreFromStore = async ({
     if (totalItems === 0) {
       await exports.updateRestoreJobAfterScan({
         jobUuid,
+        userId,
+        jobId,
         storeHash,
         jobType,
         totalImages: 0,
@@ -3336,6 +3445,8 @@ exports.processBulkRestoreFromStore = async ({
 
     await exports.updateRestoreJobAfterScan({
       jobUuid,
+      userId,
+      jobId,
       storeHash,
       jobType,
       totalImages: totals.totalImages,
@@ -3356,6 +3467,8 @@ exports.processBulkRestoreFromStore = async ({
   } catch (err) {
     await exports.updateRestoreJobAfterScan({
       jobUuid,
+      userId,
+      jobId,
       storeHash,
       jobType,
       totalImages: totals.totalImages,
@@ -3787,8 +3900,9 @@ exports.processWebhookProductBurst = async (storeHash) => {
     toQueue.push(entry);
   }
 
-  const { error: createJobError } = await exports.createBulkOptimizationJob({
+  const { error: createJobError, doc: jobDoc } = await exports.createBulkOptimizationJob({
     jobUuid,
+    userId: user._id,
     storeHash,
     jobType: "webhook",
     totalImages: imageEntries.length,
@@ -3797,7 +3911,7 @@ exports.processWebhookProductBurst = async (storeHash) => {
     jobItems,
   });
 
-  if (createJobError) {
+  if (createJobError || !jobDoc) {
     await appendWebhookLog({
       traceId: burstTraceId,
       storeHash,
@@ -3851,6 +3965,8 @@ exports.processWebhookProductBurst = async (storeHash) => {
       "optimize-image",
       {
         jobUuid,
+        userId: user._id,
+        jobId: jobDoc._id,
         job_type: "webhook",
         storeHash,
         storeUrl,

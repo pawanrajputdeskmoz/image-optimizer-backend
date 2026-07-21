@@ -9,6 +9,8 @@ async function processImageRestoreJob(job) {
   if (job.name === "restore-bulk-coordinator") {
     const result = await processBulkRestoreFromStore({
       jobUuid: job.data?.jobUuid,
+      userId: job.data?.userId,
+      jobId: job.data?.jobId,
       storeHash: job.data?.storeHash,
       storeUrl: job.data?.storeUrl,
       accessToken: job.data?.accessToken,
@@ -27,6 +29,8 @@ async function processImageRestoreJob(job) {
   if (job.name === "restore-chunk") {
     const result = await processRestoreChunkJob({
       jobUuid: job.data?.jobUuid,
+      userId: job.data?.userId,
+      jobId: job.data?.jobId,
       jobType: job.data?.job_type || "restore_bulk",
       storeHash: job.data?.storeHash,
       storeUrl: job.data?.storeUrl,
@@ -45,6 +49,8 @@ async function processImageRestoreJob(job) {
 
   const {
     jobUuid,
+    userId = null,
+    jobId = null,
     job_type: jobTypeFromData,
     storeHash,
     storeUrl,
@@ -58,6 +64,8 @@ async function processImageRestoreJob(job) {
   const maxAttempts = job.opts?.attempts || getJobAttempts();
   const result = await runRestoreImageJob({
     jobUuid,
+    userId,
+    jobId,
     jobType,
     storeHash,
     storeUrl,

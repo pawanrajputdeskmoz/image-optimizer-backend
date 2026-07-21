@@ -2,6 +2,11 @@ const mongoose = require("mongoose");
 
 const CategoryImageSchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
     store_hash: {
       type: String,
       required: true,
@@ -89,6 +94,10 @@ CategoryImageSchema.index(
 );
 
 CategoryImageSchema.index({ store_hash: 1, category_id: 1 });
+CategoryImageSchema.index(
+  { user_id: 1, channel_id: 1, tree_id: 1, category_id: 1 },
+  { partialFilterExpression: { user_id: { $type: "objectId" } } }
+);
 
 const CategoryImage = mongoose.model("CategoryImage", CategoryImageSchema);
 

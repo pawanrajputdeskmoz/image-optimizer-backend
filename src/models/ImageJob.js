@@ -3,6 +3,11 @@ const { JOB_TYPES, IMAGE_JOB_STATUSES } = require("./constants");
 
 const ImageOptimizationJobSchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
     job_uuid: {
       type: String,
       required: true,
@@ -92,10 +97,12 @@ const ImageOptimizationJobSchema = new mongoose.Schema(
   }
 );
 
-ImageOptimizationJobSchema.index({
-  store_hash: 1,
-  status: 1,
-});
+ImageOptimizationJobSchema.index({ store_hash: 1, created_at: -1 });
+ImageOptimizationJobSchema.index({ store_hash: 1, status: 1, created_at: -1 });
+ImageOptimizationJobSchema.index(
+  { user_id: 1, status: 1, created_at: -1 },
+  { partialFilterExpression: { user_id: { $type: "objectId" } } }
+);
 
 module.exports = mongoose.model(
   "ImageOptimizationJob",

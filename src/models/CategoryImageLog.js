@@ -3,6 +3,16 @@ const { JOB_TYPES, LOG_TYPES, LOG_STEPS } = require("./constants");
 
 const CategoryImageLogSchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    job_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "CategoryJob",
+      default: null,
+    },
     job_uuid: {
       type: String,
       required: true,
@@ -92,5 +102,11 @@ CategoryImageLogSchema.index({
   job_type: 1,
   created_at: -1,
 });
+CategoryImageLogSchema.index({ created_at: -1 });
+CategoryImageLogSchema.index({ log_type: 1, created_at: -1 });
+CategoryImageLogSchema.index(
+  { job_id: 1, created_at: -1 },
+  { partialFilterExpression: { job_id: { $type: "objectId" } } }
+);
 
 module.exports = mongoose.model("CategoryImageLog", CategoryImageLogSchema);

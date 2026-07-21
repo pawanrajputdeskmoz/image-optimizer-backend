@@ -395,7 +395,15 @@ exports.getBrandOptimizationJob = async (req, reply) => {
       return reply.status(400).send({ success: false, message: "job_uuid is required" });
     }
 
-    const { error, job, logs, items } = await getBrandJobStatus(jobUuid, req.storeHash);
+    const { error, job, logs, items, items_pagination } = await getBrandJobStatus(
+      jobUuid,
+      req.storeHash,
+      {
+        itemPage: req.query?.item_page,
+        itemLimit: req.query?.item_limit,
+        itemAfter: req.query?.item_after,
+      }
+    );
 
     if (error) {
       return reply.status(500).send({ success: false, message: error });
@@ -408,7 +416,9 @@ exports.getBrandOptimizationJob = async (req, reply) => {
       });
     }
 
-    return reply.status(200).send({ success: true, data: { job, logs, items } });
+    return reply
+      .status(200)
+      .send({ success: true, data: { job, logs, items, items_pagination } });
   } catch (error) {
     console.error("[getBrandOptimizationJob] Error:", error);
     return reply.status(500).send({
@@ -584,6 +594,7 @@ async function queueBulkBrandJobs(req, reply, jobType, itemsOverride = null) {
 
     const { error: createJobError, doc: jobDoc } = await createBrandBulkJob({
       jobUuid,
+      userId: req.currentUser?._id,
       storeHash,
       jobType,
       totalImages: items.length,
@@ -602,13 +613,16 @@ async function queueBulkBrandJobs(req, reply, jobType, itemsOverride = null) {
     if (toQueue.length > 0) {
       await registerPendingBrandImages(
         storeHash,
-        toQueue.map((entry) => entry.brandId)
+        toQueue.map((entry) => entry.brandId),
+        req.currentUser?._id
       );
     }
 
     if (skipped.length > 0) {
       const { error: skipLogError } = await writeBrandSkipLogs(
         skipped.map((s) => ({
+          user_id: req.currentUser?._id,
+          job_id: jobDoc._id,
           job_uuid: jobUuid,
           store_hash: storeHash,
           job_type: jobType,
@@ -626,6 +640,8 @@ async function queueBulkBrandJobs(req, reply, jobType, itemsOverride = null) {
       const BrandImageJobLog = require("../../models/BrandImageJobLog");
       await BrandImageJobLog.insertMany(
         toQueue.map((entry) => ({
+          user_id: req.currentUser?._id,
+          job_id: jobDoc._id,
           job_uuid: jobUuid,
           store_hash: storeHash,
           source_type: "brand",
@@ -644,6 +660,8 @@ async function queueBulkBrandJobs(req, reply, jobType, itemsOverride = null) {
       name: "optimize-brand",
       data: {
         jobUuid,
+        userId: req.currentUser?._id,
+        jobId: jobDoc._id,
         job_type: jobType,
         storeHash,
         accessToken,
@@ -791,6 +809,7 @@ async function queueBulkBrandRestoreJobs(req, reply, jobType, itemsOverride = nu
 
     const { error: createJobError, doc: jobDoc } = await createBrandBulkJob({
       jobUuid,
+      userId: req.currentUser?._id,
       storeHash,
       jobType,
       totalImages: items.length,
@@ -809,6 +828,8 @@ async function queueBulkBrandRestoreJobs(req, reply, jobType, itemsOverride = nu
     if (skipped.length > 0) {
       const { error: skipLogError } = await writeBrandSkipLogs(
         skipped.map((s) => ({
+          user_id: req.currentUser?._id,
+          job_id: jobDoc._id,
           job_uuid: jobUuid,
           store_hash: storeHash,
           job_type: jobType,
@@ -826,6 +847,8 @@ async function queueBulkBrandRestoreJobs(req, reply, jobType, itemsOverride = nu
       const BrandImageJobLog = require("../../models/BrandImageJobLog");
       await BrandImageJobLog.insertMany(
         toQueue.map((entry, index) => ({
+          user_id: req.currentUser?._id,
+          job_id: jobDoc._id,
           job_uuid: jobUuid,
           store_hash: storeHash,
           source_type: "brand",
@@ -846,6 +869,8 @@ async function queueBulkBrandRestoreJobs(req, reply, jobType, itemsOverride = nu
           "restore-brand",
           {
             jobUuid,
+            userId: req.currentUser?._id,
+            jobId: jobDoc._id,
             job_type: jobType,
             storeHash,
             accessToken,

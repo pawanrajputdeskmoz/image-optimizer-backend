@@ -41,6 +41,7 @@ async function resolvePlanSnapshot(planSlug) {
   if (!plan) {
     const fallback = await Plan.findOne({ slug: "free", is_active: true }).lean();
     return {
+      plan_id: fallback?._id || null,
       plan_slug: "free",
       monthly_image_limit:
         fallback?.monthly_image_limit == null ? null : Number(fallback.monthly_image_limit),
@@ -48,6 +49,7 @@ async function resolvePlanSnapshot(planSlug) {
   }
 
   return {
+    plan_id: plan._id,
     plan_slug: slug,
     monthly_image_limit:
       plan.monthly_image_limit == null ? null : Number(plan.monthly_image_limit),
@@ -56,7 +58,12 @@ async function resolvePlanSnapshot(planSlug) {
 
 async function resolveStorePlanSnapshot(storeHash) {
   const clientPlan = await ClientPlan.findOne({ store_hash: storeHash }).lean();
-  return resolvePlanSnapshot(clientPlan?.base_plan_slug || "free");
+  const snapshot = await resolvePlanSnapshot(clientPlan?.base_plan_slug || "free");
+  return {
+    ...snapshot,
+    user_id: clientPlan?.user_id || null,
+    plan_id: clientPlan?.plan_id || snapshot.plan_id || null,
+  };
 }
 
 async function countLegacyMonthlyOptimized(storeHash, monthStart) {
@@ -120,7 +127,13 @@ function formatUsageRow(row) {
 /**
  * Ensure the current month usage row exists with plan slug + monthly limit snapshot.
  */
-async function syncCurrentMonthUsage(storeHash, planSlug, monthlyLimit) {
+async function syncCurrentMonthUsage(
+  storeHash,
+  planSlug,
+  monthlyLimit,
+  userId = null,
+  planId = null
+) {
   if (!storeHash) return null;
 
   const { year, month } = getMonthPeriod();
@@ -138,6 +151,8 @@ async function syncCurrentMonthUsage(storeHash, planSlug, monthlyLimit) {
     { store_hash: storeHash, year, month },
     {
       $set: {
+        ...((userId || snapshot.user_id) ? { user_id: userId || snapshot.user_id } : {}),
+        ...((planId || snapshot.plan_id) ? { plan_id: planId || snapshot.plan_id } : {}),
         plan_slug: resolvedSlug,
         monthly_image_limit: resolvedLimit,
       },
@@ -166,11 +181,23 @@ async function ensureCurrentMonthUsage(storeHash) {
       return existing;
     }
     const snapshot = await resolveStorePlanSnapshot(storeHash);
-    return syncCurrentMonthUsage(storeHash, snapshot.plan_slug, snapshot.monthly_image_limit);
+    return syncCurrentMonthUsage(
+      storeHash,
+      snapshot.plan_slug,
+      snapshot.monthly_image_limit,
+      snapshot.user_id,
+      snapshot.plan_id
+    );
   }
 
   const snapshot = await resolveStorePlanSnapshot(storeHash);
-  return syncCurrentMonthUsage(storeHash, snapshot.plan_slug, snapshot.monthly_image_limit);
+  return syncCurrentMonthUsage(
+    storeHash,
+    snapshot.plan_slug,
+    snapshot.monthly_image_limit,
+    snapshot.user_id,
+    snapshot.plan_id
+  );
 }
 
 /**
@@ -202,6 +229,8 @@ async function recordMonthlyOptimization(
     {
       $inc: inc,
       $setOnInsert: {
+        ...(snapshot.user_id ? { user_id: snapshot.user_id } : {}),
+        ...(snapshot.plan_id ? { plan_id: snapshot.plan_id } : {}),
         store_hash: storeHash,
         year,
         month,

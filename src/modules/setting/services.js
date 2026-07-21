@@ -445,24 +445,37 @@ function mapHookToDbEntry(hook, scope, destination) {
   };
 }
 
-async function syncAutoOptimizeFlag(storeHash, enabled) {
+async function syncAutoOptimizeFlag(storeHash, enabled, userId = null) {
   await StoreOptimizationSettings.findOneAndUpdate(
     { store_hash: storeHash, channel_id: 1 },
-    { $set: { auto_optimize_new_images: Boolean(enabled) } },
+    {
+      $set: {
+        ...(userId ? { user_id: userId } : {}),
+        auto_optimize_new_images: Boolean(enabled),
+      },
+    },
     { upsert: true, setDefaultsOnInsert: true }
   );
 }
 
-async function syncCategoryAutoOptimizeFlag(storeHash, enabled) {
+async function syncCategoryAutoOptimizeFlag(storeHash, enabled, userId = null) {
   await StoreOptimizationSettings.findOneAndUpdate(
     { store_hash: storeHash, channel_id: 1 },
-    { $set: { auto_optimize_new_category_images: Boolean(enabled) } },
+    {
+      $set: {
+        ...(userId ? { user_id: userId } : {}),
+        auto_optimize_new_category_images: Boolean(enabled),
+      },
+    },
     { upsert: true, setDefaultsOnInsert: true }
   );
 }
 
-async function syncProductWebhooksInDb(storeHash, { results = [], enabled }) {
-  await syncAutoOptimizeFlag(storeHash, enabled);
+async function syncProductWebhooksInDb(
+  storeHash,
+  { results = [], enabled, userId = null }
+) {
+  await syncAutoOptimizeFlag(storeHash, enabled, userId);
 
   if (!enabled) {
     const deleted = await StoreWebhook.deleteMany({
@@ -494,6 +507,7 @@ async function syncProductWebhooksInDb(storeHash, { results = [], enabled }) {
       { store_hash: storeHash, scope: entry.scope },
       {
         $set: {
+          ...(userId ? { user_id: userId } : {}),
           store_hash: storeHash,
           hook_id: entry.hook_id,
           scope: entry.scope,
@@ -537,7 +551,7 @@ exports.syncAutoOptimizeNewImages = async (storeHash, enabled) => {
   await syncAutoOptimizeFlag(storeHash, enabled);
 };
 
-exports.registerProductCreatedWebhook = async ({ storeHash, accessToken }) => {
+exports.registerProductCreatedWebhook = async ({ storeHash, accessToken, userId = null }) => {
   if (!storeHash || !accessToken) {
     throw Object.assign(new Error("Store credentials are required"), { statusCode: 400 });
   }
@@ -549,6 +563,7 @@ exports.registerProductCreatedWebhook = async ({ storeHash, accessToken }) => {
   await syncProductWebhooksInDb(storeHash, {
     results,
     enabled: results.length > 0,
+    userId,
   });
 
   return {
@@ -625,8 +640,11 @@ exports.disableProductWebhooks = async ({ storeHash, accessToken }) => {
   };
 };
 
-async function syncCategoryWebhooksInDb(storeHash, { results = [], enabled }) {
-  await syncCategoryAutoOptimizeFlag(storeHash, enabled);
+async function syncCategoryWebhooksInDb(
+  storeHash,
+  { results = [], enabled, userId = null }
+) {
+  await syncCategoryAutoOptimizeFlag(storeHash, enabled, userId);
 
   if (!enabled) {
     const deleted = await StoreCategoryWebhook.deleteMany({
@@ -658,6 +676,7 @@ async function syncCategoryWebhooksInDb(storeHash, { results = [], enabled }) {
       { store_hash: storeHash, scope: entry.scope },
       {
         $set: {
+          ...(userId ? { user_id: userId } : {}),
           store_hash: storeHash,
           hook_id: entry.hook_id,
           scope: entry.scope,
@@ -697,7 +716,11 @@ exports.getStoreCategoryWebhooks = async (storeHash) => {
     .lean();
 };
 
-exports.registerCategoryCreatedWebhook = async ({ storeHash, accessToken }) => {
+exports.registerCategoryCreatedWebhook = async ({
+  storeHash,
+  accessToken,
+  userId = null,
+}) => {
   if (!storeHash || !accessToken) {
     throw Object.assign(new Error("Store credentials are required"), { statusCode: 400 });
   }
@@ -709,6 +732,7 @@ exports.registerCategoryCreatedWebhook = async ({ storeHash, accessToken }) => {
   await syncCategoryWebhooksInDb(storeHash, {
     results,
     enabled: results.length > 0,
+    userId,
   });
 
   return {

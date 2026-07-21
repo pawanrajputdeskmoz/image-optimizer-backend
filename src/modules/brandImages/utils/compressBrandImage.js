@@ -36,6 +36,8 @@ async function logBrandStep(logContext, payload) {
   if (!storeHash || brandId == null) return;
 
   const { error } = await appendBrandImageJobLog({
+    userId: logContext.userId,
+    jobId: logContext.jobId,
     jobUuid: resolveBrandJobUuid(logContext, storeHash, brandId),
     storeHash,
     jobType: logContext.jobType || "single",
@@ -68,6 +70,7 @@ exports.compressBrandImage = async ({
     ...logContext,
     storeHash: logContext?.storeHash || storeHash,
   };
+  let userId = logContext?.userId || null;
 
   if (!logContext?.skipQuotaCheck) {
     const User = require("../../../models/User");
@@ -75,6 +78,7 @@ exports.compressBrandImage = async ({
     const user = await User.findOne({ store_hash: storeHash })
       .select({ selectedPlan: 1 })
       .lean();
+    userId = userId || user?._id || null;
     const quota = await canOptimizeImages(storeHash, user?.selectedPlan || "free", 1);
     if (!quota.allowed) {
       await notifyPlanLimitReached(storeHash, {
@@ -154,7 +158,13 @@ exports.compressBrandImage = async ({
     if (isAnimatedGif) {
       await BrandImageStatus.updateOne(
         { store_hash: storeHash, brand_id: brandId },
-        { $set: { status: "skipped", image_update_status: "complete" } },
+        {
+          $set: {
+            ...(userId ? { user_id: userId } : {}),
+            status: "skipped",
+            image_update_status: "complete",
+          },
+        },
         { upsert: true }
       );
 
@@ -181,29 +191,31 @@ exports.compressBrandImage = async ({
     );
 
     // ── 4. Mark as optimizing in DB ─────────────────────────────────────────
-    await Promise.all([
-      BrandImageStatus.updateOne(
-        { store_hash: storeHash, brand_id: brandId },
-        {
-          $set: {
-            status: "optimizing",
-            image_update_status: "processing",
-            optimization_started_at: new Date(),
-          },
+    const brandImageDoc = await BrandImage.findOneAndUpdate(
+      { store_hash: storeHash, brand_id: brandId, original_url: imageUrl },
+      {
+        $set: {
+          ...(userId ? { user_id: userId } : {}),
+          brand_name: brandName,
+          original_image_path: originalImagePath,
         },
-        { upsert: true }
-      ),
-      BrandImage.updateOne(
-        { store_hash: storeHash, brand_id: brandId, original_url: imageUrl },
-        {
-          $set: {
-            brand_name: brandName,
-            original_image_path: originalImagePath,
-          },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    await BrandImageStatus.updateOne(
+      { store_hash: storeHash, brand_id: brandId },
+      {
+        $set: {
+          ...(userId ? { user_id: userId } : {}),
+          brand_image_id: brandImageDoc._id,
+          status: "optimizing",
+          image_update_status: "processing",
+          optimization_started_at: new Date(),
         },
-        { upsert: true, setDefaultsOnInsert: true }
-      ),
-    ]);
+      },
+      { upsert: true }
+    );
 
     // ── 5. Compress with sharp ───────────────────────────────────────────────
     const { error: optimizeError, optimizedImage } = await optimizeImage(
@@ -287,7 +299,13 @@ exports.compressBrandImage = async ({
         ),
       ]);
 
-      await updateStoreStats({ storeHash, originalSize, optimizedSize: originalSize, savedBytes: 0 });
+      await updateStoreStats({
+        storeHash,
+        userId,
+        originalSize,
+        optimizedSize: originalSize,
+        savedBytes: 0,
+      });
 
       await logBrandStep(effectiveLogContext, {
         logType: "info",
@@ -408,6 +426,7 @@ exports.compressBrandImage = async ({
 
     await updateStoreStats({
       storeHash,
+      userId,
       originalSize: Number(sizeMeta.original.size) || 0,
       optimizedSize: Number(sizeMeta.optimized.size) || 0,
       savedBytes,
@@ -466,6 +485,7 @@ exports.compressBrandImage = async ({
         { store_hash: storeHash },
         {
           $inc: { failed_images: 1 },
+          ...(userId ? { $set: { user_id: userId } } : {}),
           $setOnInsert: { store_hash: storeHash },
         },
         { upsert: true }
@@ -481,7 +501,13 @@ exports.compressBrandImage = async ({
   }
 };
 
-async function updateStoreStats({ storeHash, originalSize, optimizedSize, savedBytes }) {
+async function updateStoreStats({
+  storeHash,
+  userId = null,
+  originalSize,
+  optimizedSize,
+  savedBytes,
+}) {
   try {
     const statDoc = await StoreImageStat.findOneAndUpdate(
       { store_hash: storeHash },
@@ -492,7 +518,10 @@ async function updateStoreStats({ storeHash, originalSize, optimizedSize, savedB
           total_optimized_size: optimizedSize,
           total_saved_bytes: savedBytes,
         },
-        $set: { last_optimized_at: new Date() },
+        $set: {
+          ...(userId ? { user_id: userId } : {}),
+          last_optimized_at: new Date(),
+        },
         $setOnInsert: { store_hash: storeHash },
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }

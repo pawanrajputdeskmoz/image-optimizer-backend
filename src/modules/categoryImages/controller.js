@@ -496,10 +496,12 @@ exports.getCategoryOptimizationJob = async (req, reply) => {
       });
     }
 
-    const { error: statusError, job, logs, items } = await getCategoryJobStatus(
-      jobUuid,
-      req.storeHash
-    );
+    const { error: statusError, job, logs, items, items_pagination } =
+      await getCategoryJobStatus(jobUuid, req.storeHash, {
+        itemPage: req.query?.item_page,
+        itemLimit: req.query?.item_limit,
+        itemAfter: req.query?.item_after,
+      });
 
     if (statusError) {
       return reply.status(500).send({
@@ -517,7 +519,7 @@ exports.getCategoryOptimizationJob = async (req, reply) => {
 
     return reply.status(200).send({
       success: true,
-      data: { job, logs, items },
+      data: { job, logs, items, items_pagination },
     });
   } catch (error) {
     console.error("[getCategoryOptimizationJob] Error:", error);
@@ -677,6 +679,7 @@ async function queueBulkCategoryJobs(req, reply, jobType, itemsOverride = null) 
     // ── Persist job + item records ──────────────────────────────────────────
     const { error: createJobError, doc: jobDoc } = await createCategoryBulkJob({
       jobUuid,
+      userId: req.currentUser?._id,
       storeHash,
       jobType,
       totalImages: items.length,
@@ -699,7 +702,8 @@ async function queueBulkCategoryJobs(req, reply, jobType, itemsOverride = null) 
           category_id: entry.categoryId,
           channel_id: entry.channelId,
           tree_id: entry.treeId,
-        }))
+        })),
+        req.currentUser?._id
       );
     }
 
@@ -707,6 +711,8 @@ async function queueBulkCategoryJobs(req, reply, jobType, itemsOverride = null) 
     if (skipped.length > 0) {
       const { error: skipLogError } = await writeCategorySkipLogs(
         skipped.map((s) => ({
+          user_id: req.currentUser?._id,
+          job_id: jobDoc._id,
           job_uuid: jobUuid,
           store_hash: storeHash,
           channel_id: channelId,
@@ -729,6 +735,8 @@ async function queueBulkCategoryJobs(req, reply, jobType, itemsOverride = null) 
           "optimize-category",
           {
             jobUuid,
+            userId: req.currentUser?._id,
+            jobId: jobDoc._id,
             job_type: jobType,
             storeHash,
             accessToken,
@@ -897,6 +905,7 @@ async function queueBulkCategoryRestoreJobs(req, reply, jobType, itemsOverride =
     // ── Persist job + item records ──────────────────────────────────────────
     const { error: createJobError, doc: jobDoc } = await createCategoryBulkJob({
       jobUuid,
+      userId: req.currentUser?._id,
       storeHash,
       jobType,
       totalImages: items.length,
@@ -916,6 +925,8 @@ async function queueBulkCategoryRestoreJobs(req, reply, jobType, itemsOverride =
     if (skipped.length > 0) {
       const { error: skipLogError } = await writeCategorySkipLogs(
         skipped.map((s) => ({
+          user_id: req.currentUser?._id,
+          job_id: jobDoc._id,
           job_uuid: jobUuid,
           store_hash: storeHash,
           channel_id: channelId,
@@ -938,6 +949,8 @@ async function queueBulkCategoryRestoreJobs(req, reply, jobType, itemsOverride =
           "restore-category",
           {
             jobUuid,
+            userId: req.currentUser?._id,
+            jobId: jobDoc._id,
             job_type: jobType,
             storeHash,
             accessToken,

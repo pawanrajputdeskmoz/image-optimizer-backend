@@ -4,10 +4,20 @@ const PAYMENT_STATUSES = ["PENDING", "COMPLETED", "FAILED", "EXPIRED"];
 
 const PaymentHistorySchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
     store_hash: {
       type: String,
       required: true,
       index: true,
+    },
+    plan_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Plan",
+      default: null,
     },
     plan_slug: {
       type: String,
@@ -78,6 +88,10 @@ const PaymentHistorySchema = new mongoose.Schema(
 );
 
 PaymentHistorySchema.index({ store_hash: 1, created_at: -1 });
+PaymentHistorySchema.index(
+  { user_id: 1, created_at: -1 },
+  { partialFilterExpression: { user_id: { $type: "objectId" } } }
+);
 
 module.exports = mongoose.model("PaymentHistory", PaymentHistorySchema);
 module.exports.PAYMENT_STATUSES = PAYMENT_STATUSES;

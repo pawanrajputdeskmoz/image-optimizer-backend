@@ -3,6 +3,16 @@ const { JOB_TYPES, IMAGE_JOB_ITEM_STATUSES } = require("./constants");
 
 const BrandJobItemSchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    job_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "BrandJob",
+      default: null,
+    },
     job_uuid: {
       type: String,
       required: true,
@@ -79,5 +89,13 @@ const BrandJobItemSchema = new mongoose.Schema(
 
 BrandJobItemSchema.index({ job_uuid: 1, brand_id: 1 }, { unique: true });
 BrandJobItemSchema.index({ job_uuid: 1, status: 1 });
+BrandJobItemSchema.index({ store_hash: 1, job_uuid: 1, status: 1 });
+BrandJobItemSchema.index({ status: 1, completed_at: 1 });
+BrandJobItemSchema.index({ job_uuid: 1, created_at: 1, _id: 1 });
+BrandJobItemSchema.index({ job_uuid: 1, _id: 1 });
+BrandJobItemSchema.index(
+  { job_id: 1, status: 1, created_at: 1 },
+  { partialFilterExpression: { job_id: { $type: "objectId" } } }
+);
 
 module.exports = mongoose.model("BrandJobItem", BrandJobItemSchema);

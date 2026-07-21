@@ -29,6 +29,8 @@ async function startWorker() {
     async (job) => {
       const {
         jobUuid,
+        userId = null,
+        jobId = null,
         storeHash,
         storeUrl,
         accessToken,
@@ -48,6 +50,8 @@ async function startWorker() {
         queuedImages,
       } = await streamCatalogFetchToJobItems({
         jobUuid,
+        userId,
+        jobId,
         storeHash,
         accessToken,
         storeUrl,
@@ -62,6 +66,8 @@ async function startWorker() {
       if (catalogError) {
         await updateJobAfterCatalogFetch({
           jobUuid,
+          userId,
+          jobId,
           storeHash,
           totalImages: 0,
           queuedImages: 0,
@@ -75,6 +81,8 @@ async function startWorker() {
       if (!queuedImages) {
         await updateJobAfterCatalogFetch({
           jobUuid,
+          userId,
+          jobId,
           storeHash,
           totalImages: meta?.images_found ?? 0,
           queuedImages: 0,
@@ -87,6 +95,8 @@ async function startWorker() {
 
       await updateJobAfterCatalogFetch({
         jobUuid,
+        userId,
+        jobId,
         storeHash,
         totalImages: meta?.images_found ?? queuedImages,
         queuedImages,
@@ -104,6 +114,8 @@ async function startWorker() {
         dispatched,
       } = await queueOptimizationBatchJobs({
         jobUuid,
+        userId,
+        jobId,
         batchCount,
         storeHash,
         storeUrl,
@@ -165,6 +177,8 @@ async function startWorker() {
     if (data?.jobUuid && data?.storeHash) {
       await updateJobAfterCatalogFetch({
         jobUuid: data.jobUuid,
+        userId: data.userId,
+        jobId: data.jobId,
         storeHash: data.storeHash,
         totalImages: 0,
         queuedImages: 0,

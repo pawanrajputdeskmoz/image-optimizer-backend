@@ -4,6 +4,11 @@ const ASSIGNED_BY_VALUES = ["client", "admin", "system"];
 
 const ClientPlanSchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
     store_hash: {
       type: String,
       required: true,
@@ -16,6 +21,11 @@ const ClientPlanSchema = new mongoose.Schema(
       trim: true,
       lowercase: true,
       default: "free",
+    },
+    plan_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Plan",
+      default: null,
     },
     assigned_by: {
       type: String,
@@ -35,6 +45,15 @@ const ClientPlanSchema = new mongoose.Schema(
     },
   }
 );
+
+ClientPlanSchema.index(
+  { user_id: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { user_id: { $type: "objectId" } },
+  }
+);
+ClientPlanSchema.index({ plan_id: 1, store_hash: 1 });
 
 module.exports = mongoose.model("ClientPlan", ClientPlanSchema);
 module.exports.ASSIGNED_BY_VALUES = ASSIGNED_BY_VALUES;

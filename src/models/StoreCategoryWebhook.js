@@ -7,6 +7,11 @@ const mongoose = require("mongoose");
 
 const StoreCategoryWebhookSchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
     store_hash: {
       type: String,
       required: true,
@@ -51,5 +56,12 @@ const StoreCategoryWebhookSchema = new mongoose.Schema(
 
 StoreCategoryWebhookSchema.index({ store_hash: 1, scope: 1 }, { unique: true });
 StoreCategoryWebhookSchema.index({ store_hash: 1, hook_id: 1 });
+StoreCategoryWebhookSchema.index(
+  { user_id: 1, scope: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { user_id: { $type: "objectId" } },
+  }
+);
 
 module.exports = mongoose.model("StoreCategoryWebhook", StoreCategoryWebhookSchema);

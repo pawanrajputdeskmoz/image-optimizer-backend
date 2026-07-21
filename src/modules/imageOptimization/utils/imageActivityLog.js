@@ -19,6 +19,8 @@ function resolveJobUuid(logContext = {}, storeHash) {
  * Persist one row to ImageOptimizationLog. Never throws; returns { error } on failure.
  */
 async function appendImageLog({
+  userId = null,
+  jobId = null,
   jobUuid,
   storeHash,
   jobType = "single",
@@ -36,6 +38,8 @@ async function appendImageLog({
   try {
     const validJobType = normalizeJobType(jobType) || "single";
     await ImageOptimizationLog.create({
+      user_id: userId,
+      job_id: jobId,
       job_uuid: jobUuid || standaloneJobUuid(storeHash),
       store_hash: storeHash,
       job_type: validJobType,

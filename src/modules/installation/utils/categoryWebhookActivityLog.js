@@ -1,5 +1,6 @@
 const CategoryWebhookLog = require("../../../models/CategoryWebhookLog");
 const StoreCategoryWebhookEvent = require("../../../models/StoreCategoryWebhookEvent");
+const StoreCategoryWebhook = require("../../../models/StoreCategoryWebhook");
 const { WEBHOOK_LOG_STEPS_SET } = require("../../../models/constants");
 
 function buildCategoryWebhookTraceId(storeHash, eventHash) {
@@ -22,13 +23,34 @@ function resolveTraceId({ traceId, storeHash, eventHash }) {
   );
 }
 
-async function nextCategoryWebhookLogSequence(traceId) {
+async function nextCategoryWebhookLogContext(traceId, storeHash, eventHash) {
+  if (storeHash && eventHash) {
+    const event = await StoreCategoryWebhookEvent.findOneAndUpdate(
+      { store_hash: storeHash, event_hash: eventHash },
+      { $inc: { log_sequence: 1 } },
+      { returnDocument: "after" }
+    )
+      .select({ log_sequence: 1, user_id: 1 })
+      .lean();
+    if (event) {
+      return {
+        sequence: event.log_sequence,
+        webhookEventId: event._id,
+        userId: event.user_id || null,
+      };
+    }
+  }
+
   const lastLog = await CategoryWebhookLog.findOne({ trace_id: traceId })
     .sort({ sequence: -1 })
     .select({ sequence: 1 })
     .lean();
 
-  return (lastLog?.sequence || 0) + 1;
+  return {
+    sequence: (lastLog?.sequence || 0) + 1,
+    webhookEventId: null,
+    userId: null,
+  };
 }
 
 async function appendCategoryWebhookLog({
@@ -52,9 +74,12 @@ async function appendCategoryWebhookLog({
 
   try {
     const resolvedTraceId = resolveTraceId({ traceId, storeHash, eventHash });
-    const sequence = await nextCategoryWebhookLogSequence(resolvedTraceId);
+    const { sequence, webhookEventId, userId } =
+      await nextCategoryWebhookLogContext(resolvedTraceId, storeHash, eventHash);
 
     await CategoryWebhookLog.create({
+      user_id: userId,
+      webhook_event_id: webhookEventId,
       trace_id: resolvedTraceId,
       store_hash: storeHash,
       event_hash: eventHash,
@@ -94,10 +119,17 @@ async function upsertCategoryWebhookEvent({
   }
 
   try {
+    const registration = scope
+      ? await StoreCategoryWebhook.findOne({ store_hash: storeHash, scope })
+          .select({ _id: 1, user_id: 1 })
+          .lean()
+      : null;
     await StoreCategoryWebhookEvent.findOneAndUpdate(
       { store_hash: storeHash, event_hash: eventHash },
       {
         $set: {
+          ...(registration?.user_id ? { user_id: registration.user_id } : {}),
+          ...(registration?._id ? { webhook_id: registration._id } : {}),
           trace_id: resolveTraceId({ traceId, storeHash, eventHash }),
           store_hash: storeHash,
           event_hash: eventHash,

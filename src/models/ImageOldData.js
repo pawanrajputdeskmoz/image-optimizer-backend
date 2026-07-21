@@ -2,6 +2,16 @@ const mongoose = require("mongoose");
 
 const ImageOldDataSchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    image_optimization_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ImageOptimization",
+      default: null,
+    },
     store_hash: {
       type: String,
       required: true,
@@ -91,5 +101,16 @@ ImageOldDataSchema.index(
 
 ImageOldDataSchema.index({ store_hash: 1, image_id: 1 });
 ImageOldDataSchema.index({ store_hash: 1, product_id: 1 });
+ImageOldDataSchema.index(
+  { image_optimization_id: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { image_optimization_id: { $type: "objectId" } },
+  }
+);
+ImageOldDataSchema.index(
+  { user_id: 1, product_id: 1, image_id: 1 },
+  { partialFilterExpression: { user_id: { $type: "objectId" } } }
+);
 
 module.exports = mongoose.model("ImageOldData", ImageOldDataSchema);

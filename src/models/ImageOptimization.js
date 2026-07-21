@@ -2,6 +2,11 @@ const mongoose = require("mongoose");
 
 const ImageOptimizationSchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
     store_hash: {
       type: String,
       required: true,
@@ -73,5 +78,10 @@ ImageOptimizationSchema.index(
 );
 
 ImageOptimizationSchema.index({ store_hash: 1, product_id: 1 });
+ImageOptimizationSchema.index(
+  { user_id: 1, product_id: 1, image_id: 1 },
+  { partialFilterExpression: { user_id: { $type: "objectId" } } }
+);
+ImageOptimizationSchema.index({ store_hash: 1, image_id: 1 });
 
 module.exports = mongoose.model("ImageOptimization", ImageOptimizationSchema);

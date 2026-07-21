@@ -62,6 +62,7 @@ const UserSchema = new mongoose.Schema(
       default: false,
     },
     selectedPlan: {
+      
       type: String,
       trim: true,
       lowercase: true,

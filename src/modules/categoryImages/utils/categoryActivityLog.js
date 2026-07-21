@@ -14,6 +14,8 @@ function resolveCategoryJobUuid(logContext = {}, storeHash, categoryId = null) {
 }
 
 async function appendCategoryImageLog({
+  userId = null,
+  jobId = null,
   jobUuid,
   storeHash,
   channelId = 1,
@@ -34,6 +36,8 @@ async function appendCategoryImageLog({
   try {
     const validJobType = normalizeJobType(jobType) || "single";
     await CategoryImageLog.create({
+      user_id: userId,
+      job_id: jobId,
       job_uuid: jobUuid || standaloneCategoryJobUuid(storeHash, categoryId),
       store_hash: storeHash,
       channel_id: Number(channelId) || 1,

@@ -33,6 +33,8 @@ async function startWorker() {
     async (job) => {
       const {
         jobUuid,
+        userId = null,
+        jobId = null,
         job_type: jobType = "checkBox",
         storeHash,
         accessToken,
@@ -47,7 +49,7 @@ async function startWorker() {
       const isLastAttempt = job.attemptsMade + 1 >= maxAttempts;
 
       const logContext = jobUuid
-        ? { jobUuid, storeHash, jobType, brandId }
+        ? { userId, jobId, jobUuid, storeHash, jobType, brandId }
         : null;
 
       // ── Mark item as "optimizing" ────────────────────────────────────────
@@ -61,6 +63,8 @@ async function startWorker() {
         if (statusError) {
           console.error("[brand-image-worker] set optimizing status:", statusError);
           await appendBrandImageJobLog({
+            userId,
+            jobId,
             jobUuid,
             storeHash,
             jobType,
@@ -96,6 +100,8 @@ async function startWorker() {
           }
 
           await appendBrandImageJobLog({
+            userId,
+            jobId,
             jobUuid,
             storeHash,
             jobType,
@@ -125,6 +131,8 @@ async function startWorker() {
         }
 
         await appendBrandImageJobLog({
+          userId,
+          jobId,
           jobUuid,
           storeHash,
           jobType,
@@ -229,6 +237,8 @@ async function startWorker() {
     const data = job?.data;
     if (data?.storeHash && data?.brandId != null) {
       await appendBrandImageJobLog({
+        userId: data.userId,
+        jobId: data.jobId,
         jobUuid: data.jobUuid,
         storeHash: data.storeHash,
         jobType: data.job_type || "checkBox",

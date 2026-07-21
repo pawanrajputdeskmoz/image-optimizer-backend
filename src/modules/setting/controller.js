@@ -137,7 +137,11 @@ exports.upsertStoreOptimizationSettings = async (req, reply) => {
   const body = req.body || {};
   const channelId = Number(body.channel_id) || 1;
 
-  const $set = { store_hash, channel_id: channelId };
+  const $set = {
+    user_id: req.currentUser?._id,
+    store_hash,
+    channel_id: channelId,
+  };
   for (const key of ALLOWED_KEYS) {
     if (!Object.prototype.hasOwnProperty.call(body, key)) continue;
     if (key === "channel_id") continue;
@@ -173,7 +177,11 @@ exports.registerProductCreatedWebhookHandler = async (req, reply) => {
   }
 
   try {
-    const result = await registerProductCreatedWebhook({ storeHash, accessToken });
+    const result = await registerProductCreatedWebhook({
+      storeHash,
+      accessToken,
+      userId: req.currentUser?._id,
+    });
 
     return reply.send({
       success: true,
@@ -245,7 +253,11 @@ exports.registerCategoryCreatedWebhookHandler = async (req, reply) => {
   }
 
   try {
-    const result = await registerCategoryCreatedWebhook({ storeHash, accessToken });
+    const result = await registerCategoryCreatedWebhook({
+      storeHash,
+      accessToken,
+      userId: req.currentUser?._id,
+    });
 
     return reply.send({
       success: true,

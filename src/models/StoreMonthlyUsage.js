@@ -4,6 +4,11 @@ const IMAGE_TYPES = ["product", "category", "brand", "home_banner"];
 
 const StoreMonthlyUsageSchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
     store_hash: {
       type: String,
       required: true,
@@ -52,6 +57,11 @@ const StoreMonthlyUsageSchema = new mongoose.Schema(
       lowercase: true,
       default: "free",
     },
+    plan_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Plan",
+      default: null,
+    },
     /** Monthly image cap snapshot — null means unlimited for this month */
     monthly_image_limit: {
       type: Number,
@@ -69,6 +79,13 @@ const StoreMonthlyUsageSchema = new mongoose.Schema(
 
 StoreMonthlyUsageSchema.index({ store_hash: 1, year: 1, month: 1 }, { unique: true });
 StoreMonthlyUsageSchema.index({ store_hash: 1, year: -1, month: -1 });
+StoreMonthlyUsageSchema.index(
+  { user_id: 1, year: 1, month: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { user_id: { $type: "objectId" } },
+  }
+);
 
 module.exports = mongoose.model("StoreMonthlyUsage", StoreMonthlyUsageSchema);
 module.exports.IMAGE_TYPES = IMAGE_TYPES;

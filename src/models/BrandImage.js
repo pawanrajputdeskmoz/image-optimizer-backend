@@ -2,6 +2,11 @@ const mongoose = require("mongoose");
 
 const BrandImageSchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
     store_hash: {
       type: String,
       required: true,
@@ -77,5 +82,9 @@ BrandImageSchema.index(
 );
 
 BrandImageSchema.index({ store_hash: 1, brand_id: 1 });
+BrandImageSchema.index(
+  { user_id: 1, brand_id: 1 },
+  { partialFilterExpression: { user_id: { $type: "objectId" } } }
+);
 
 module.exports = mongoose.model("BrandImage", BrandImageSchema);

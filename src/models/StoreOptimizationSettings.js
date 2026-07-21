@@ -11,6 +11,12 @@ const StoreOptimizationSettingsSchema = new mongoose.Schema(
     // Store
     //=======================================================
 
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+
     store_hash: {
       type: String,
       required: true,
@@ -135,6 +141,13 @@ const StoreOptimizationSettingsSchema = new mongoose.Schema(
 StoreOptimizationSettingsSchema.index(
   { store_hash: 1, channel_id: 1 },
   { unique: true }
+);
+StoreOptimizationSettingsSchema.index(
+  { user_id: 1, channel_id: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { user_id: { $type: "objectId" } },
+  }
 );
 
 module.exports = mongoose.model(

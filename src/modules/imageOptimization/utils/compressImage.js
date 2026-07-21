@@ -48,6 +48,8 @@ async function logCompressActivity(
   };
 
   const { error } = await appendImageLog({
+    userId: ctx.userId,
+    jobId: ctx.jobId,
     jobUuid: resolveJobUuid(ctx, ctx.storeHash),
     storeHash: ctx.storeHash,
     jobType: ctx.jobType,
@@ -78,6 +80,7 @@ exports.compressImage = async ({
   logContext = null,
   skipQuotaCheck = false,
 }) => {
+  let userId = logContext?.userId || null;
   if (!skipQuotaCheck && storeHash) {
     const User = require("../../../models/User");
     const {
@@ -87,6 +90,7 @@ exports.compressImage = async ({
     const user = await User.findOne({ store_hash: storeHash })
       .select({ selectedPlan: 1 })
       .lean();
+    userId = userId || user?._id || null;
     const quota = await canOptimizeImages(storeHash, user?.selectedPlan || "free", 1);
     if (!quota.allowed) {
       await notifyPlanLimitReached(storeHash, {
@@ -227,6 +231,7 @@ exports.compressImage = async ({
         { store_hash: storeHash, product_id: productId, image_id: imageId },
         {
           $set: {
+            ...(userId ? { user_id: userId } : {}),
             imageName: oldImageName,
             altText: preservedOldAltText,
             ...(runFilename && newImageName ? { newImageName } : {}),
@@ -330,25 +335,27 @@ exports.compressImage = async ({
     const optimizationType =
       imageQuality >= 75 ? "high" : imageQuality >= 45 ? "medium" : "low";
 
-    // None of these three depend on each other's result (imageOptimizationDoc
-    // is only read later, after compress/replace), so fire them together.
-    const [imageOptimizationResult] = await Promise.all([
-      ImageOptimization.findOneAndUpdate(
-        { store_hash: storeHash, product_id: productId, image_id: imageId },
-        {
-          $set: {
-            bigcommerce_image_url: imageUrl,
-            original_image_path: filePath,
-            optimization_type: optimizationType,
-            image_quality: imageQuality,
-          },
+    imageOptimizationDoc = await ImageOptimization.findOneAndUpdate(
+      { store_hash: storeHash, product_id: productId, image_id: imageId },
+      {
+        $set: {
+          ...(userId ? { user_id: userId } : {}),
+          bigcommerce_image_url: imageUrl,
+          original_image_path: filePath,
+          optimization_type: optimizationType,
+          image_quality: imageQuality,
         },
-        { upsert: true, new: true, setDefaultsOnInsert: true }
-      ),
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    await Promise.all([
       ImageStatus.updateOne(
         { store_hash: storeHash, product_id: productId, image_id: imageId },
         {
           $set: {
+            ...(userId ? { user_id: userId } : {}),
+            image_optimization_id: imageOptimizationDoc._id,
             status: "optimizing",
             image_update_status: "processing",
             optimization_started_at: new Date(),
@@ -360,6 +367,8 @@ exports.compressImage = async ({
         { store_hash: storeHash, product_id: productId, image_id: imageId },
         {
           $set: {
+            ...(userId ? { user_id: userId } : {}),
+            image_optimization_id: imageOptimizationDoc._id,
             original_image_path: filePath,
             imageName: oldImageName,
             altText: preservedOldAltText,
@@ -370,7 +379,6 @@ exports.compressImage = async ({
         { upsert: true }
       ),
     ]);
-    imageOptimizationDoc = imageOptimizationResult;
 
     const meta = await sharp(filePath, { failOn: "none", animated: false }).metadata();
     const inputFormat = String(meta.format || "jpeg").toLowerCase();
@@ -673,7 +681,10 @@ exports.compressImage = async ({
                 total_optimized_size: optSize,
                 total_saved_bytes: savedBytes,
               },
-              $set: { last_optimized_at: new Date() },
+              $set: {
+                ...(userId ? { user_id: userId } : {}),
+                last_optimized_at: new Date(),
+              },
               $setOnInsert: { store_hash: storeHash },
             },
             { upsert: true, new: true, setDefaultsOnInsert: true }
@@ -750,6 +761,7 @@ exports.compressImage = async ({
         { store_hash: storeHash },
         {
           $inc: { failed_images: 1 },
+          ...(userId ? { $set: { user_id: userId } } : {}),
           $setOnInsert: { store_hash: storeHash },
         },
         { upsert: true }

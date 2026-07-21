@@ -2,6 +2,11 @@ const mongoose = require("mongoose");
 
 const StoreImageStatSchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
     store_hash: {
       type: String,
       required: true,
@@ -74,6 +79,14 @@ const StoreImageStatSchema = new mongoose.Schema(
       createdAt: "created_at",
       updatedAt: "updated_at",
     },
+  }
+);
+
+StoreImageStatSchema.index(
+  { user_id: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { user_id: { $type: "objectId" } },
   }
 );
 

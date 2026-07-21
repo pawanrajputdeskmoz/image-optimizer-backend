@@ -507,6 +507,7 @@ exports.shouldSkipBrandOptimization = async (storeHash, brandId) => {
  */
 exports.createBrandBulkJob = async ({
   jobUuid = crypto.randomUUID(),
+  userId = null,
   storeHash,
   jobType,
   totalImages,
@@ -521,6 +522,7 @@ exports.createBrandBulkJob = async ({
 
   try {
     const doc = await BrandJob.create({
+      user_id: userId,
       job_uuid: jobUuid,
       store_hash: storeHash,
       job_type: validJobType,
@@ -535,7 +537,14 @@ exports.createBrandBulkJob = async ({
     });
 
     if (jobItems.length > 0) {
-      await BrandJobItem.insertMany(jobItems, { ordered: false });
+      await BrandJobItem.insertMany(
+        jobItems.map((item) => ({
+          ...item,
+          user_id: userId,
+          job_id: doc._id,
+        })),
+        { ordered: false }
+      );
     }
 
     return { error: null, jobUuid, doc };
@@ -549,7 +558,7 @@ exports.createBrandBulkJob = async ({
  * Mark brand images pending for store dashboard stats.
  * Skips already optimized, optimizing, or already-pending brands.
  */
-async function registerPendingBrandImages(storeHash, brandIds = []) {
+async function registerPendingBrandImages(storeHash, brandIds = [], userId = null) {
   if (!storeHash || !brandIds.length) return { registered: 0, error: null };
 
   const normalized = [];
@@ -586,7 +595,11 @@ async function registerPendingBrandImages(storeHash, brandIds = []) {
       updateOne: {
         filter: { store_hash: storeHash, brand_id: brandId },
         update: {
-          $set: { status: "pending", image_update_status: "pending" },
+          $set: {
+            ...(userId ? { user_id: userId } : {}),
+            status: "pending",
+            image_update_status: "pending",
+          },
           $setOnInsert: { store_hash: storeHash, brand_id: brandId },
         },
         upsert: true,
@@ -599,7 +612,7 @@ async function registerPendingBrandImages(storeHash, brandIds = []) {
       (Number(bulkResult.modifiedCount) || 0);
 
     if (registered > 0) {
-      await adjustPendingImages(storeHash, registered);
+      await adjustPendingImages(storeHash, registered, userId);
     }
 
     return { registered, error: null };
@@ -838,13 +851,22 @@ exports.recordBrandJobItemResult = async ({
 /**
  * Fetch a BrandJob with its items and recent logs (for status polling).
  */
-exports.getBrandJobStatus = async (jobUuid, storeHash) => {
+exports.getBrandJobStatus = async (jobUuid, storeHash, options = {}) => {
   const query = { job_uuid: jobUuid };
   const logQuery = { job_uuid: jobUuid };
+  const itemQuery = { job_uuid: jobUuid };
   if (storeHash) {
     query.store_hash = storeHash;
     logQuery.store_hash = storeHash;
+    itemQuery.store_hash = storeHash;
   }
+  const itemLimit = Math.min(500, Math.max(1, Number(options.itemLimit) || 100));
+  const itemPage = Math.max(1, Number(options.itemPage) || 1);
+  const itemAfter =
+    /^[a-f\d]{24}$/i.test(String(options.itemAfter || ""))
+      ? String(options.itemAfter)
+      : null;
+  if (itemAfter) itemQuery._id = { $gt: itemAfter };
 
   try {
     const [job, logs, items] = await Promise.all([
@@ -853,7 +875,11 @@ exports.getBrandJobStatus = async (jobUuid, storeHash) => {
         .sort({ created_at: -1 })
         .limit(200)
         .lean(),
-      BrandJobItem.find({ job_uuid: jobUuid }).sort({ created_at: 1 }).lean(),
+      BrandJobItem.find(itemQuery)
+        .sort({ _id: 1 })
+        .skip(itemAfter ? 0 : (itemPage - 1) * itemLimit)
+        .limit(itemLimit)
+        .lean(),
     ]);
 
     if (!job) return { error: null, job: null, logs, items };
@@ -866,6 +892,13 @@ exports.getBrandJobStatus = async (jobUuid, storeHash) => {
       job: { ...job, pending_images: Math.max(0, queued - processed) },
       logs,
       items,
+      items_pagination: {
+        page: itemPage,
+        limit: itemLimit,
+        total: Number(job.total_images) || 0,
+        next_cursor:
+          items.length === itemLimit ? String(items[items.length - 1]._id) : null,
+      },
     };
   } catch (err) {
     console.error("[getBrandJobStatus]", err.message);

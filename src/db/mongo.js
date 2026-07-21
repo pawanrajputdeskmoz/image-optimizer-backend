@@ -16,13 +16,20 @@ async function connectMongo() {
 
   try {
     const dbName = process.env.MONGODB_DB;
+    const autoIndex =
+      process.env.MONGOOSE_AUTO_INDEX != null
+        ? process.env.MONGOOSE_AUTO_INDEX === "true"
+        : process.env.NODE_ENV !== "production";
 
-    await mongoose.connect(uri, dbName ? { dbName } : {});
+    await mongoose.connect(uri, {
+      ...(dbName ? { dbName } : {}),
+      autoIndex,
+    });
 
     isConnected = true;
 
     const { HomeBannerImage } = require("../models");
-    if (HomeBannerImage?.syncModelIndexes) {
+    if (autoIndex && HomeBannerImage?.syncModelIndexes) {
       await HomeBannerImage.syncModelIndexes();
     }
 

@@ -6,6 +6,16 @@ const {
 
 const CategoryImageStatusSchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    category_image_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "CategoryImage",
+      default: null,
+    },
     store_hash: {
       type: String,
       required: true,
@@ -76,7 +86,19 @@ CategoryImageStatusSchema.index(
   { unique: true }
 );
 
-CategoryImageStatusSchema.index({ store_hash: 1, status: 1 });
+CategoryImageStatusSchema.index({ store_hash: 1, status: 1, optimized_at: 1 });
+CategoryImageStatusSchema.index({ status: 1, optimized_at: 1 });
+CategoryImageStatusSchema.index(
+  { category_image_id: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { category_image_id: { $type: "objectId" } },
+  }
+);
+CategoryImageStatusSchema.index(
+  { user_id: 1, status: 1, optimized_at: 1 },
+  { partialFilterExpression: { user_id: { $type: "objectId" } } }
+);
 
 const CategoryImageStatus = mongoose.model(
   "CategoryImageStatus",

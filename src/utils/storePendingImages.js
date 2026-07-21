@@ -3,7 +3,7 @@ const StoreImageStat = require("../models/StoreImageStat");
 /**
  * Adjust dashboard pending_images counter (can be negative for completions).
  */
-async function adjustPendingImages(storeHash, delta) {
+async function adjustPendingImages(storeHash, delta, userId = null) {
   const amount = Number(delta) || 0;
   if (!storeHash || amount === 0) return { error: null };
 
@@ -12,6 +12,7 @@ async function adjustPendingImages(storeHash, delta) {
       { store_hash: storeHash },
       {
         $inc: { pending_images: amount },
+        ...(userId ? { $set: { user_id: userId } } : {}),
         $setOnInsert: { store_hash: storeHash },
       },
       { upsert: true }

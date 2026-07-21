@@ -3,6 +3,16 @@ const { JOB_TYPES, IMAGE_JOB_ITEM_STATUSES } = require("./constants");
 
 const CategoryJobItemSchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    job_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "CategoryJob",
+      default: null,
+    },
     job_uuid: {
       type: String,
       required: true,
@@ -88,5 +98,13 @@ CategoryJobItemSchema.index(
 );
 
 CategoryJobItemSchema.index({ job_uuid: 1, status: 1 });
+CategoryJobItemSchema.index({ store_hash: 1, job_uuid: 1, status: 1 });
+CategoryJobItemSchema.index({ status: 1, completed_at: 1 });
+CategoryJobItemSchema.index({ job_uuid: 1, created_at: 1, _id: 1 });
+CategoryJobItemSchema.index({ job_uuid: 1, _id: 1 });
+CategoryJobItemSchema.index(
+  { job_id: 1, status: 1, created_at: 1 },
+  { partialFilterExpression: { job_id: { $type: "objectId" } } }
+);
 
 module.exports = mongoose.model("CategoryJobItem", CategoryJobItemSchema);

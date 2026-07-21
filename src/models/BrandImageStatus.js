@@ -6,6 +6,16 @@ const {
 
 const BrandImageStatusSchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    brand_image_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "BrandImage",
+      default: null,
+    },
     store_hash: {
       type: String,
       required: true,
@@ -54,6 +64,18 @@ BrandImageStatusSchema.index(
   { unique: true }
 );
 
-BrandImageStatusSchema.index({ store_hash: 1, status: 1 });
+BrandImageStatusSchema.index({ store_hash: 1, status: 1, optimized_at: 1 });
+BrandImageStatusSchema.index({ status: 1, optimized_at: 1 });
+BrandImageStatusSchema.index(
+  { brand_image_id: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { brand_image_id: { $type: "objectId" } },
+  }
+);
+BrandImageStatusSchema.index(
+  { user_id: 1, status: 1, optimized_at: 1 },
+  { partialFilterExpression: { user_id: { $type: "objectId" } } }
+);
 
 module.exports = mongoose.model("BrandImageStatus", BrandImageStatusSchema);

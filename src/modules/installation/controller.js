@@ -114,7 +114,7 @@ exports.installApp = async (req, reply) => {
     const storeInfo = storeInfoResponse?.data || {};
     console.log("running.... 2")
  
-    await saveInstalledStore({
+    const installedUser = await saveInstalledStore({
       storeHash,
       access_token,
       user,
@@ -134,6 +134,7 @@ exports.installApp = async (req, reply) => {
       { store_hash: storeHash, channel_id: 1 },
       {
         $setOnInsert: {
+          user_id: installedUser._id,
           store_hash: storeHash,
           channel_id: 1,
           optimize_image_enabled: true,

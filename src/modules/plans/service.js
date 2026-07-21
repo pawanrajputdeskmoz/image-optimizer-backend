@@ -89,6 +89,7 @@ exports.buildPlanLimitApiBody = (quota = {}) => ({
 function formatPlan(plan) {
   if (!plan) return null;
   return {
+    id: plan._id,
     slug: plan.slug,
     name: plan.name,
     description: plan.description || null,
@@ -299,29 +300,38 @@ async function assignStorePlan(storeHash, planSlug, { assignedBy = "client" } = 
     $set.started_at = new Date();
   }
 
-  const [clientPlanDoc, user] = await Promise.all([
-    ClientPlan.findOneAndUpdate(
-      { store_hash: storeHash },
-      {
-        $set,
-        $setOnInsert: { store_hash: storeHash },
-      },
-      { upsert: true, returnDocument: "after" }
-    ).lean(),
-    User.findOneAndUpdate(
-      { store_hash: storeHash },
-      { $set: { selectedPlan: normalized } },
-      { returnDocument: "after" }
-    )
-      .select({ selectedPlan: 1, store_hash: 1 })
-      .lean(),
-  ]);
+  const user = await User.findOneAndUpdate(
+    { store_hash: storeHash },
+    { $set: { selectedPlan: normalized } },
+    { returnDocument: "after" }
+  )
+    .select({ selectedPlan: 1, store_hash: 1 })
+    .lean();
 
   if (!user) {
     return { error: "Store not found", user: null, client_plan: null, plan: null };
   }
 
-  await syncCurrentMonthUsage(storeHash, normalized, plan.monthly_image_limit);
+  const clientPlanDoc = await ClientPlan.findOneAndUpdate(
+    { store_hash: storeHash },
+    {
+      $set: {
+        ...$set,
+        user_id: user._id,
+        plan_id: plan.id,
+      },
+      $setOnInsert: { store_hash: storeHash },
+    },
+    { upsert: true, returnDocument: "after" }
+  ).lean();
+
+  await syncCurrentMonthUsage(
+    storeHash,
+    normalized,
+    plan.monthly_image_limit,
+    user._id,
+    plan.id
+  );
 
   return {
     error: null,
@@ -354,15 +364,39 @@ exports.upsertClientPlan = async (storeHash, payload = {}, assignedBy = null) =>
     $set.started_at = new Date();
   }
 
+  const user = await User.findOneAndUpdate(
+    { store_hash: storeHash },
+    { $set: { selectedPlan: baseSlug } },
+    { returnDocument: "after" }
+  )
+    .select({ _id: 1 })
+    .lean();
+
+  if (!user) {
+    return { error: "Store not found", client_plan: null, effective_plan: null, resume: null };
+  }
+
   const clientPlanDoc = await ClientPlan.findOneAndUpdate(
     { store_hash: storeHash },
-    { $set, $setOnInsert: { store_hash: storeHash } },
+    {
+      $set: {
+        ...$set,
+        user_id: user._id,
+        plan_id: basePlan.id,
+      },
+      $setOnInsert: { store_hash: storeHash },
+    },
     { upsert: true, returnDocument: "after" }
   ).lean();
 
   await Promise.all([
-    User.updateOne({ store_hash: storeHash }, { $set: { selectedPlan: baseSlug } }),
-    syncCurrentMonthUsage(storeHash, baseSlug, basePlan.monthly_image_limit),
+    syncCurrentMonthUsage(
+      storeHash,
+      baseSlug,
+      basePlan.monthly_image_limit,
+      user._id,
+      basePlan.id
+    ),
     exports.clearPausedPlanLimitJobs(storeHash),
   ]);
 
@@ -380,12 +414,20 @@ exports.deleteClientPlan = async (storeHash) => {
   }
 
   const result = await ClientPlan.deleteOne({ store_hash: storeHash });
-  await User.updateOne({ store_hash: storeHash }, { $set: { selectedPlan: "free" } });
+  const user = await User.findOneAndUpdate(
+    { store_hash: storeHash },
+    { $set: { selectedPlan: "free" } },
+    { returnDocument: "after" }
+  )
+    .select({ _id: 1 })
+    .lean();
   const freePlan = await exports.getPlanBySlug("free", { activeOnly: true });
   await ClientPlan.findOneAndUpdate(
     { store_hash: storeHash },
     {
       $set: {
+        ...(user?._id ? { user_id: user._id } : {}),
+        ...(freePlan?.id ? { plan_id: freePlan.id } : {}),
         base_plan_slug: "free",
         assigned_by: "system",
       },
@@ -393,7 +435,13 @@ exports.deleteClientPlan = async (storeHash) => {
     },
     { upsert: true }
   );
-  await syncCurrentMonthUsage(storeHash, "free", freePlan?.monthly_image_limit ?? 100);
+  await syncCurrentMonthUsage(
+    storeHash,
+    "free",
+    freePlan?.monthly_image_limit ?? 100,
+    user?._id || null,
+    freePlan?.id || null
+  );
 
   const effectivePlan = await exports.getEffectivePlanForStore(storeHash, "free");
 
@@ -405,7 +453,7 @@ exports.deleteClientPlan = async (storeHash) => {
   };
 };
 
-exports.ensureClientPlan = async (storeHash, planSlug = "free") => {
+exports.ensureClientPlan = async (storeHash, planSlug = "free", userId = null) => {
   if (!storeHash) return null;
   const normalized = normalizeSlug(planSlug) || "free";
   const existing = await ClientPlan.findOne({ store_hash: storeHash }).lean();
@@ -413,10 +461,26 @@ exports.ensureClientPlan = async (storeHash, planSlug = "free") => {
     const activePlan = await exports.getPlanBySlug(existing.base_plan_slug || "free", {
       activeOnly: true,
     });
+    if (
+      (userId && String(existing.user_id || "") !== String(userId)) ||
+      (activePlan?.id && String(existing.plan_id || "") !== String(activePlan.id))
+    ) {
+      await ClientPlan.updateOne(
+        { _id: existing._id },
+        {
+          $set: {
+            ...(userId ? { user_id: userId } : {}),
+            ...(activePlan?.id ? { plan_id: activePlan.id } : {}),
+          },
+        }
+      );
+    }
     await syncCurrentMonthUsage(
       storeHash,
       existing.base_plan_slug || normalized,
-      activePlan?.monthly_image_limit ?? null
+      activePlan?.monthly_image_limit ?? null,
+      userId || existing.user_id || null,
+      activePlan?.id || existing.plan_id || null
     );
     return formatClientPlan(existing);
   }
@@ -426,6 +490,8 @@ exports.ensureClientPlan = async (storeHash, planSlug = "free") => {
     { store_hash: storeHash },
     {
       $setOnInsert: {
+        ...(userId ? { user_id: userId } : {}),
+        ...(plan?.id ? { plan_id: plan.id } : {}),
         store_hash: storeHash,
         base_plan_slug: normalized,
         assigned_by: "system",
@@ -434,7 +500,13 @@ exports.ensureClientPlan = async (storeHash, planSlug = "free") => {
     { upsert: true, returnDocument: "after" }
   ).lean();
 
-  await syncCurrentMonthUsage(storeHash, normalized, plan?.monthly_image_limit ?? null);
+  await syncCurrentMonthUsage(
+    storeHash,
+    normalized,
+    plan?.monthly_image_limit ?? null,
+    userId,
+    plan?.id || null
+  );
 
   return formatClientPlan(doc);
 };

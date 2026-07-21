@@ -889,6 +889,7 @@ exports.shouldSkipCategoryOptimization = async (storeHash, categoryId) => {
  */
 exports.createCategoryBulkJob = async ({
   jobUuid = crypto.randomUUID(),
+  userId = null,
   storeHash,
   jobType,
   totalImages,
@@ -907,6 +908,7 @@ exports.createCategoryBulkJob = async ({
 
   try {
     const doc = await CategoryJob.create({
+      user_id: userId,
       job_uuid: jobUuid,
       store_hash: storeHash,
       job_type: validJobType,
@@ -921,7 +923,14 @@ exports.createCategoryBulkJob = async ({
     });
 
     if (jobItems.length > 0) {
-      await CategoryJobItem.insertMany(jobItems, { ordered: false });
+      await CategoryJobItem.insertMany(
+        jobItems.map((item) => ({
+          ...item,
+          user_id: userId,
+          job_id: doc._id,
+        })),
+        { ordered: false }
+      );
     }
 
     return { error: null, jobUuid, doc };
@@ -935,7 +944,11 @@ exports.createCategoryBulkJob = async ({
  * Mark category images pending for store dashboard stats.
  * Skips already optimized, optimizing, or already-pending categories.
  */
-async function registerPendingCategoryImages(storeHash, categories = []) {
+async function registerPendingCategoryImages(
+  storeHash,
+  categories = [],
+  userId = null
+) {
   if (!storeHash || !categories.length) return { registered: 0, error: null };
 
   const normalized = [];
@@ -984,6 +997,7 @@ async function registerPendingCategoryImages(storeHash, categories = []) {
         },
         update: {
           $set: {
+            ...(userId ? { user_id: userId } : {}),
             status: "pending",
             image_update_status: "pending",
             channel_id: row.channelId,
@@ -1006,7 +1020,7 @@ async function registerPendingCategoryImages(storeHash, categories = []) {
       (Number(bulkResult.modifiedCount) || 0);
 
     if (registered > 0) {
-      await adjustPendingImages(storeHash, registered);
+      await adjustPendingImages(storeHash, registered, userId);
     }
 
     return { registered, error: null };
@@ -1280,13 +1294,22 @@ exports.writeCategorySkipLogs = async (skippedEntries = []) => {
 /**
  * Fetch a CategoryJob with its items and recent logs (for status polling).
  */
-exports.getCategoryJobStatus = async (jobUuid, storeHash) => {
+exports.getCategoryJobStatus = async (jobUuid, storeHash, options = {}) => {
   const query = { job_uuid: jobUuid };
   const logQuery = { job_uuid: jobUuid };
+  const itemQuery = { job_uuid: jobUuid };
   if (storeHash) {
     query.store_hash = storeHash;
     logQuery.store_hash = storeHash;
+    itemQuery.store_hash = storeHash;
   }
+  const itemLimit = Math.min(500, Math.max(1, Number(options.itemLimit) || 100));
+  const itemPage = Math.max(1, Number(options.itemPage) || 1);
+  const itemAfter =
+    /^[a-f\d]{24}$/i.test(String(options.itemAfter || ""))
+      ? String(options.itemAfter)
+      : null;
+  if (itemAfter) itemQuery._id = { $gt: itemAfter };
 
   try {
     const CategoryImageLog = require("../../models/CategoryImageLog");
@@ -1297,7 +1320,11 @@ exports.getCategoryJobStatus = async (jobUuid, storeHash) => {
         .sort({ created_at: -1 })
         .limit(200)
         .lean(),
-      CategoryJobItem.find({ job_uuid: jobUuid }).sort({ created_at: 1 }).lean(),
+      CategoryJobItem.find(itemQuery)
+        .sort({ _id: 1 })
+        .skip(itemAfter ? 0 : (itemPage - 1) * itemLimit)
+        .limit(itemLimit)
+        .lean(),
     ]);
 
     if (!job) {
@@ -1315,6 +1342,13 @@ exports.getCategoryJobStatus = async (jobUuid, storeHash) => {
       },
       logs,
       items,
+      items_pagination: {
+        page: itemPage,
+        limit: itemLimit,
+        total: Number(job.total_images) || 0,
+        next_cursor:
+          items.length === itemLimit ? String(items[items.length - 1]._id) : null,
+      },
     };
   } catch (err) {
     console.error("[getCategoryJobStatus]", err.message);
@@ -1594,8 +1628,9 @@ exports.processWebhookCategoryBurst = async (storeHash) => {
     toQueue.push(entry);
   }
 
-  const { error: createJobError } = await exports.createCategoryBulkJob({
+  const { error: createJobError, doc: jobDoc } = await exports.createCategoryBulkJob({
     jobUuid,
+    userId: user._id,
     storeHash,
     jobType: "webhook",
     totalImages: categoryEntries.length,
@@ -1604,7 +1639,7 @@ exports.processWebhookCategoryBurst = async (storeHash) => {
     jobItems,
   });
 
-  if (createJobError) {
+  if (createJobError || !jobDoc) {
     await appendCategoryWebhookLog({
       traceId: burstTraceId,
       storeHash,
@@ -1623,7 +1658,8 @@ exports.processWebhookCategoryBurst = async (storeHash) => {
         category_id: entry.category_id,
         channel_id: entry.channel_id,
         tree_id: entry.tree_id,
-      }))
+      })),
+      user._id
     );
   }
 
@@ -1645,6 +1681,8 @@ exports.processWebhookCategoryBurst = async (storeHash) => {
       "optimize-category",
       {
         jobUuid,
+        userId: user._id,
+        jobId: jobDoc._id,
         job_type: "webhook",
         storeHash,
         accessToken,

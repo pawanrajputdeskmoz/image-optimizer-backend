@@ -42,6 +42,8 @@ async function startWorker() {
 
       const {
         jobUuid,
+        userId = null,
+        jobId = null,
         job_type: jobType = "checkBox",
         storeHash,
         accessToken,
@@ -58,7 +60,7 @@ async function startWorker() {
       const isLastAttempt = job.attemptsMade + 1 >= maxAttempts;
 
       const logContext = jobUuid
-        ? { jobUuid, storeHash, jobType, channelId, treeId, categoryId }
+        ? { userId, jobId, jobUuid, storeHash, jobType, channelId, treeId, categoryId }
         : null;
 
       const runOptimize = Boolean(settings?.optimize_image_enabled);
@@ -74,6 +76,8 @@ async function startWorker() {
         if (statusError) {
           console.error("[category-image-worker] set optimizing status:", statusError);
           await appendCategoryImageLog({
+            userId,
+            jobId,
             jobUuid,
             storeHash,
             channelId,
@@ -114,6 +118,8 @@ async function startWorker() {
           }
 
           await appendCategoryImageLog({
+            userId,
+            jobId,
             jobUuid,
             storeHash,
             channelId,
@@ -149,6 +155,8 @@ async function startWorker() {
         }
 
         await appendCategoryImageLog({
+          userId,
+          jobId,
           jobUuid,
           storeHash,
           channelId,
@@ -261,6 +269,8 @@ async function startWorker() {
     const data = job?.data;
     if (data?.storeHash && data?.categoryId != null) {
       await appendCategoryImageLog({
+        userId: data.userId,
+        jobId: data.jobId,
         jobUuid: data.jobUuid,
         storeHash: data.storeHash,
         channelId: data.channelId || 1,

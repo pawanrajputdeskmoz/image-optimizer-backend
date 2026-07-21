@@ -6,6 +6,11 @@ const {
 
 const HomeBannerImageSchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
     store_hash: {
       type: String,
       required: true,
@@ -145,6 +150,15 @@ const HomeBannerImageSchema = new mongoose.Schema(
 HomeBannerImageSchema.index(
   { store_hash: 1, channel_id: 1, source_type: 1, source_key: 1 },
   { unique: true }
+);
+HomeBannerImageSchema.index({
+  store_hash: 1,
+  optimization_status: 1,
+  last_optimized_at: 1,
+});
+HomeBannerImageSchema.index(
+  { user_id: 1, optimization_status: 1, last_optimized_at: 1 },
+  { partialFilterExpression: { user_id: { $type: "objectId" } } }
 );
 
 const HomeBannerImage = mongoose.model("HomeBannerImage", HomeBannerImageSchema);

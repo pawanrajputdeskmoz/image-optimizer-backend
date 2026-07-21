@@ -29,6 +29,8 @@ function resolveBrandJobUuid(logContext = {}, storeHash, brandId = null) {
 }
 
 async function appendBrandImageJobLog({
+  userId = null,
+  jobId = null,
   jobUuid,
   storeHash,
   jobType = "single",
@@ -61,6 +63,8 @@ async function appendBrandImageJobLog({
     }
 
     await BrandImageJobLog.create({
+      user_id: userId,
+      job_id: jobId,
       job_uuid: resolvedJobUuid,
       store_hash: storeHash,
       source_type: "brand",

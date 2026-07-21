@@ -125,7 +125,7 @@ exports.saveInstalledStore = async ({
     { upsert: true, new: true }
   ).then(async (user) => {
     const { ensureClientPlan } = require("../plans/service");
-    await ensureClientPlan(storeHash, "free");
+    await ensureClientPlan(storeHash, "free", user._id);
     return user;
   });
 };

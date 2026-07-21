@@ -3,6 +3,16 @@ const { LOG_TYPES, WEBHOOK_LOG_STEPS } = require("./constants");
 
 const WebhookLogSchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    webhook_event_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "StoreWebhookEvent",
+      default: null,
+    },
     trace_id: {
       type: String,
       required: true,
@@ -86,5 +96,13 @@ WebhookLogSchema.index({ trace_id: 1, sequence: 1 }, { unique: true });
 WebhookLogSchema.index({ trace_id: 1, created_at: 1 });
 WebhookLogSchema.index({ store_hash: 1, created_at: -1 });
 WebhookLogSchema.index({ store_hash: 1, event_hash: 1, created_at: -1 });
+WebhookLogSchema.index({ created_at: -1 });
+WebhookLogSchema.index({ log_type: 1, created_at: -1 });
+WebhookLogSchema.index(
+  { webhook_event_id: 1, sequence: 1 },
+  {
+    partialFilterExpression: { webhook_event_id: { $type: "objectId" } },
+  }
+);
 
 module.exports = mongoose.model("WebhookLog", WebhookLogSchema);

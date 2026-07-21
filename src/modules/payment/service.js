@@ -55,7 +55,7 @@ function paypalErrorMessage(err) {
  * Create a PayPal order for a paid plan upgrade.
  * Price/currency always come from the Plan document — never from the client.
  */
-exports.createPlanOrder = async (storeHash, planId) => {
+exports.createPlanOrder = async (storeHash, planId, userId = null) => {
   const slug = String(planId || "").trim().toLowerCase();
   if (!storeHash || !slug) {
     return { error: "planId is required", code: "INVALID_REQUEST", statusCode: 400 };
@@ -149,6 +149,8 @@ exports.createPlanOrder = async (storeHash, planId) => {
     ]);
 
     await PaymentHistory.create({
+      user_id: userId,
+      plan_id: targetPlan.id,
       store_hash: storeHash,
       plan_slug: targetPlan.slug,
       plan_name: targetPlan.name,

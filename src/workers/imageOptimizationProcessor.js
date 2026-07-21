@@ -1,4 +1,7 @@
 const ImageJobItem = require("../models/ImageJobItem");
+const ImageOldData = require("../models/ImageOldData");
+const ImageStatus = require("../models/ImageStatus");
+const ImageOptimization = require("../models/ImageOptimization");
 const { compressImage } = require("../modules/imageOptimization/utils/compressImage");
 const { resolveProductImageUrl } = require("../modules/imageOptimization/utils/urls");
 const {
@@ -32,6 +35,8 @@ function imageResultConsumesQuota(result, settings) {
  */
 async function processSingleImageOptimization({
   jobUuid,
+  userId = null,
+  jobId = null,
   jobType,
   storeHash,
   storeUrl,
@@ -46,6 +51,9 @@ async function processSingleImageOptimization({
   maxAttempts = 1,
   attemptsMade = 0,
   skipQuotaCheck = false,
+  usePrefetched = false,
+  prefetchedStatusRow = null,
+  prefetchedOptimizationRow = null,
 }) {
   console.log("[image-optimization-worker] process start", {
     jobUuid,
@@ -61,6 +69,8 @@ async function processSingleImageOptimization({
 
   if (storeHash) {
     await appendImageLog({
+      userId,
+      jobId,
       jobUuid,
       storeHash,
       jobType,
@@ -81,7 +91,7 @@ async function processSingleImageOptimization({
 
   const isLastAttempt = attemptsMade + 1 >= maxAttempts;
   const logContext = jobUuid
-    ? { jobUuid, storeHash, jobType, productId, imageId }
+    ? { userId, jobId, jobUuid, storeHash, jobType, productId, imageId }
     : null;
 
   const runOptimize = Boolean(settings?.optimize_image_enabled);
@@ -97,6 +107,8 @@ async function processSingleImageOptimization({
     if (statusError) {
       console.error("[image-optimization-worker] optimizing status:", statusError);
       await appendImageLog({
+        userId,
+        jobId,
         jobUuid,
         storeHash,
         jobType,
@@ -129,7 +141,13 @@ async function processSingleImageOptimization({
       storeHash,
       productId,
       imageId,
-      { accessToken, forceReoptimize }
+      {
+        accessToken,
+        forceReoptimize,
+        usePrefetched,
+        prefetchedStatusRow,
+        prefetchedOptimizationRow,
+      }
     );
     const skipBlocks =
       skip && !(metadataTemplatesOn && skipCode === "optimized");
@@ -148,6 +166,8 @@ async function processSingleImageOptimization({
 
       if (storeHash) {
         await appendImageLog({
+          userId,
+          jobId,
           jobUuid,
           storeHash,
           jobType,
@@ -328,6 +348,8 @@ async function processSingleImageOptimization({
     });
     if (storeHash) {
       await appendImageLog({
+        userId,
+        jobId,
         jobUuid,
         storeHash,
         jobType,
@@ -350,6 +372,8 @@ async function processSingleImageOptimization({
 
   if (storeHash) {
     await appendImageLog({
+      userId,
+      jobId,
       jobUuid,
       storeHash,
       jobType,
@@ -368,6 +392,8 @@ async function processSingleImageOptimization({
 async function processOptimizationBatchJob(job) {
   const {
     jobUuid,
+    userId = null,
+    jobId = null,
     job_type: jobTypeFromData,
     type: legacyJobType,
     storeHash,
@@ -412,6 +438,34 @@ async function processOptimizationBatchJob(job) {
     return { batchIndex, processed: 0, skipped: 0, failed: 0 };
   }
 
+  const productIds = [...new Set(items.map((item) => Number(item.product_id)))];
+  const imageIds = [...new Set(items.map((item) => Number(item.image_id)))];
+  const relationFilter = {
+    store_hash: storeHash,
+    product_id: { $in: productIds },
+    image_id: { $in: imageIds },
+  };
+  const [savedRows, statusRows, optimizationRows] = await Promise.all([
+    ImageOldData.find(relationFilter)
+      .select({ product_id: 1, image_id: 1, imageName: 1, altText: 1, newImageName: 1, newAltText: 1 })
+      .lean(),
+    ImageStatus.find({
+      ...relationFilter,
+      status: { $in: ["optimized", "optimizing"] },
+    })
+      .select({ product_id: 1, image_id: 1, status: 1 })
+      .lean(),
+    ImageOptimization.find(relationFilter)
+      .select({ product_id: 1, image_id: 1 })
+      .lean(),
+  ]);
+  const rowKey = (row) => `${Number(row.product_id)}:${Number(row.image_id)}`;
+  const savedImageDataMap = new Map(savedRows.map((row) => [rowKey(row), row]));
+  const statusMap = new Map(statusRows.map((row) => [rowKey(row), row]));
+  const optimizationMap = new Map(
+    optimizationRows.map((row) => [rowKey(row), row])
+  );
+
   const productContextCache = new Map();
   const storeOptions = { currency, store_name };
   let processed = 0;
@@ -450,6 +504,7 @@ async function processOptimizationBatchJob(job) {
           settings,
           storeOptions,
           productContextCache,
+          savedImageDataMap,
           placementOverrides: item,
         });
 
@@ -473,6 +528,8 @@ async function processOptimizationBatchJob(job) {
 
         const result = await processSingleImageOptimization({
           jobUuid,
+          userId,
+          jobId,
           jobType,
           storeHash,
           storeUrl,
@@ -486,6 +543,9 @@ async function processOptimizationBatchJob(job) {
           maxAttempts,
           attemptsMade: attempt,
           skipQuotaCheck: Boolean(job.data?.skipQuotaCheck),
+          usePrefetched: true,
+          prefetchedStatusRow: statusMap.get(rowKey(item)) || null,
+          prefetchedOptimizationRow: optimizationMap.get(rowKey(item)) || null,
         });
 
         if (result?.skipped) {
@@ -548,6 +608,8 @@ async function processOptimizationBatchJob(job) {
     });
 
     await appendImageLog({
+      userId,
+      jobId,
       jobUuid,
       storeHash,
       jobType,
@@ -603,6 +665,8 @@ async function processImageOptimizationJob(job) {
     });
     if (job.data?.storeHash) {
       await appendImageLog({
+        userId: job.data.userId,
+        jobId: job.data.jobId,
         jobUuid: job.data.jobUuid,
         storeHash: job.data.storeHash,
         jobType: job.data.job_type || job.data.type || "bulk",
@@ -631,6 +695,8 @@ async function processImageOptimizationJob(job) {
 
   if (job.data?.storeHash) {
     await appendImageLog({
+      userId: job.data.userId,
+      jobId: job.data.jobId,
       jobUuid: job.data.jobUuid,
       storeHash: job.data.storeHash,
       jobType: job.data.job_type || job.data.type || "bulk",
@@ -649,6 +715,8 @@ async function processImageOptimizationJob(job) {
 
   const {
     jobUuid,
+    userId = null,
+    jobId = null,
     job_type: jobTypeFromData,
     type: legacyJobType,
     storeHash,
@@ -667,6 +735,8 @@ async function processImageOptimizationJob(job) {
 
   return processSingleImageOptimization({
     jobUuid,
+    userId,
+    jobId,
     jobType,
     storeHash,
     storeUrl,

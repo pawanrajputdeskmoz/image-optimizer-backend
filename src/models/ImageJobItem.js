@@ -3,6 +3,16 @@ const { JOB_TYPES, IMAGE_JOB_ITEM_STATUSES } = require("./constants");
 
 const ImageJobItemSchema = new mongoose.Schema(
   {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    job_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ImageOptimizationJob",
+      default: null,
+    },
     job_uuid: {
       type: String,
       required: true,
@@ -102,6 +112,25 @@ ImageJobItemSchema.index(
   { unique: true }
 );
 
-ImageJobItemSchema.index({ job_uuid: 1, batch_index: 1 });
+ImageJobItemSchema.index({
+  job_uuid: 1,
+  batch_index: 1,
+  status: 1,
+  product_id: 1,
+  image_id: 1,
+});
+ImageJobItemSchema.index({
+  store_hash: 1,
+  product_id: 1,
+  image_id: 1,
+  status: 1,
+});
+ImageJobItemSchema.index({ status: 1, completed_at: 1 });
+ImageJobItemSchema.index({ job_uuid: 1, created_at: 1, _id: 1 });
+ImageJobItemSchema.index({ job_uuid: 1, _id: 1 });
+ImageJobItemSchema.index(
+  { job_id: 1, status: 1, created_at: 1 },
+  { partialFilterExpression: { job_id: { $type: "objectId" } } }
+);
 
 module.exports = mongoose.model("ImageJobItem", ImageJobItemSchema);

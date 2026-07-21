@@ -8,7 +8,8 @@ exports.createOrderHandler = async (req, reply) => {
   try {
     const { error, code, statusCode, paypalOrderId, approvalUrl } = await createPlanOrder(
       req.storeHash,
-      req.body?.planId
+      req.body?.planId,
+      req.currentUser?._id
     );
 
     if (error) {

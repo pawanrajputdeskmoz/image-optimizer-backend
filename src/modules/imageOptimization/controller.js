@@ -869,7 +869,7 @@ exports.singleImageOptimization = async (req, reply) => {
 
     await registerPendingProductImages(storeHash, [
       { product_id: productId, image_id: imageId },
-    ]);
+    ], req.currentUser?._id);
 
     const planLimitReply = await replyIfMonthlyPlanLimitExceeded(
       reply,
@@ -1031,7 +1031,8 @@ exports.bulkImageOptimization = async (req, reply) => {
 
     // Create a placeholder job record immediately — status "fetching"
     const ImageJob = require("../../models/ImageJob");
-    await ImageJob.create({
+    const jobDoc = await ImageJob.create({
+      user_id: req.currentUser?._id,
       job_uuid: jobUuid,
       store_hash: storeHash,
       job_type: "bulk",
@@ -1050,6 +1051,8 @@ exports.bulkImageOptimization = async (req, reply) => {
       "fetch-catalog",
       {
         jobUuid,
+        userId: req.currentUser?._id,
+        jobId: jobDoc._id,
         storeHash,
         storeUrl,
         accessToken,
@@ -1089,10 +1092,18 @@ exports.getOptimizationJob = async (req, reply) => {
       });
     }
 
-    const { error: statusError, job, logs, items, plan_limit } = await getOptimizationJobStatus(
-      jobUuid,
-      req.storeHash
-    );
+    const {
+      error: statusError,
+      job,
+      logs,
+      items,
+      items_pagination,
+      plan_limit,
+    } = await getOptimizationJobStatus(jobUuid, req.storeHash, {
+      itemPage: req.query?.item_page,
+      itemLimit: req.query?.item_limit,
+      itemAfter: req.query?.item_after,
+    });
 
     if (statusError) {
       return reply.status(500).send({
@@ -1110,7 +1121,13 @@ exports.getOptimizationJob = async (req, reply) => {
 
     return reply.status(200).send({
       success: true,
-      data: { job, logs, items, plan_limit: plan_limit || job?.plan_limit || null },
+      data: {
+        job,
+        logs,
+        items,
+        items_pagination,
+        plan_limit: plan_limit || job?.plan_limit || null,
+      },
     });
   } catch (error) {
     console.error("[getOptimizationJob] Error:", error);
@@ -1249,13 +1266,14 @@ exports.bulkRestoreAll = async (req, reply) => {
     }
 
     const jobUuid = crypto.randomUUID();
-    const { error: placeholderError } = await createRestoreJobPlaceholder({
+    const { error: placeholderError, doc: jobDoc } = await createRestoreJobPlaceholder({
       jobUuid,
+      userId: req.currentUser?._id,
       storeHash,
       jobType: "restore_bulk",
     });
 
-    if (placeholderError) {
+    if (placeholderError || !jobDoc) {
       return reply.status(500).send({
         success: false,
         message: placeholderError,
@@ -1267,6 +1285,8 @@ exports.bulkRestoreAll = async (req, reply) => {
       "restore-bulk-coordinator",
       {
         jobUuid,
+        userId: req.currentUser?._id,
+        jobId: jobDoc._id,
         storeHash,
         storeUrl,
         accessToken,
@@ -1657,6 +1677,7 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
 
     const { error: createJobError, doc: jobDoc } = await createBulkOptimizationJob({
       jobUuid,
+      userId: req.currentUser?._id,
       storeHash,
       jobType,
       totalImages: items.length,
@@ -1694,6 +1715,8 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
       const { error: batchQueueError, results, queued, duplicates, paused } =
         await queueOptimizationBatchJobs({
           jobUuid,
+          userId: req.currentUser?._id,
+          jobId: jobDoc._id,
           batchCount,
           storeHash,
           storeUrl,
@@ -1764,6 +1787,8 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
           "optimize-image",
           {
             jobUuid,
+            userId: req.currentUser?._id,
+            jobId: jobDoc._id,
             job_type: jobType,
             storeHash,
             storeUrl,

@@ -50,6 +50,8 @@ async function logCategoryStep(logContext, payload) {
   if (!storeHash || categoryId == null) return;
 
   const { error } = await appendCategoryImageLog({
+    userId: logContext.userId,
+    jobId: logContext.jobId,
     jobUuid: resolveCategoryJobUuid(logContext, storeHash, categoryId),
     storeHash,
     channelId: logContext.channelId ?? 1,
@@ -107,6 +109,7 @@ exports.compressCategoryImage = async ({
     ...logContext,
     storeHash: logContext?.storeHash || storeHash,
   };
+  let userId = logContext?.userId || null;
 
   if (!logContext?.skipQuotaCheck) {
     const User = require("../../../models/User");
@@ -114,6 +117,7 @@ exports.compressCategoryImage = async ({
     const user = await User.findOne({ store_hash: storeHash })
       .select({ selectedPlan: 1 })
       .lean();
+    userId = userId || user?._id || null;
     const quota = await canOptimizeImages(storeHash, user?.selectedPlan || "free", 1);
     if (!quota.allowed) {
       await notifyPlanLimitReached(storeHash, {
@@ -202,6 +206,7 @@ exports.compressCategoryImage = async ({
         { store_hash: storeHash, category_id: categoryId },
         {
           $set: {
+            ...(userId ? { user_id: userId } : {}),
             status: "skipped",
             image_update_status: "complete",
             original_url: imageUrl,
@@ -239,34 +244,36 @@ exports.compressCategoryImage = async ({
       Boolean(meta.hasAlpha)
     );
 
-    await Promise.all([
-      CategoryImageStatus.updateOne(
-        { store_hash: storeHash, category_id: categoryId },
-        {
-          $set: {
-            status: "optimizing",
-            image_update_status: "processing",
-            optimization_started_at: new Date(),
-            original_url: imageUrl,
-            channel_id: channelId,
-            ...(treeId != null ? { tree_id: treeId } : {}),
-          },
+    const categoryImageDoc = await CategoryImage.findOneAndUpdate(
+      { store_hash: storeHash, category_id: categoryId, original_url: imageUrl },
+      {
+        $set: {
+          ...(userId ? { user_id: userId } : {}),
+          channel_id: channelId,
+          tree_id: treeId,
+          category_name: categoryName,
+          original_image_path: originalImagePath,
         },
-        { upsert: true }
-      ),
-      CategoryImage.updateOne(
-        { store_hash: storeHash, category_id: categoryId, original_url: imageUrl },
-        {
-          $set: {
-            channel_id: channelId,
-            tree_id: treeId,
-            category_name: categoryName,
-            original_image_path: originalImagePath,
-          },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    await CategoryImageStatus.updateOne(
+      { store_hash: storeHash, category_id: categoryId },
+      {
+        $set: {
+          ...(userId ? { user_id: userId } : {}),
+          category_image_id: categoryImageDoc._id,
+          status: "optimizing",
+          image_update_status: "processing",
+          optimization_started_at: new Date(),
+          original_url: imageUrl,
+          channel_id: channelId,
+          ...(treeId != null ? { tree_id: treeId } : {}),
         },
-        { upsert: true, setDefaultsOnInsert: true }
-      ),
-    ]);
+      },
+      { upsert: true }
+    );
 
     await logCategoryStep(effectiveLogContext, {
       logType: "info",
@@ -578,7 +585,10 @@ exports.compressCategoryImage = async ({
             total_optimized_size: optSize,
             total_saved_bytes: savedBytes,
           },
-          $set: { last_optimized_at: new Date() },
+          $set: {
+            ...(userId ? { user_id: userId } : {}),
+            last_optimized_at: new Date(),
+          },
           $setOnInsert: { store_hash: storeHash },
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
@@ -648,6 +658,7 @@ exports.compressCategoryImage = async ({
         { store_hash: storeHash },
         {
           $inc: { failed_images: 1 },
+          ...(userId ? { $set: { user_id: userId } } : {}),
           $setOnInsert: { store_hash: storeHash },
         },
         { upsert: true }
