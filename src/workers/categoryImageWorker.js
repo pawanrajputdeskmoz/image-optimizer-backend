@@ -184,6 +184,15 @@ async function startWorker() {
         });
 
         if (!result.success) {
+          if (result.plan_limit) {
+            return {
+              skipped: true,
+              plan_limit: true,
+              reason: result.error,
+              category_id: categoryId,
+            };
+          }
+
           errorMessage = result.error || "Category image optimization failed";
           if (!isLastAttempt) {
             throw new Error(errorMessage);

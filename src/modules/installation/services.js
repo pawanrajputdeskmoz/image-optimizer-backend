@@ -68,6 +68,7 @@ exports.syncUserStoreFromBigCommerce = async (storeHash, accessToken) => {
 };
 
 exports.exchangeOAuthToken = async ({ code, scope, context }) => {
+  
   return post("https://login.bigcommerce.com/oauth2/token", {
     client_id: process.env.BIG_COMMERCE_CLIENT_ID,
     client_secret: process.env.BIG_COMMERCE_CLIENT_SECRET,

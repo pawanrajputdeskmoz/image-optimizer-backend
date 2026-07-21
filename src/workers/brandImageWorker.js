@@ -156,6 +156,15 @@ async function startWorker() {
         });
 
         if (!result.success) {
+          if (result.plan_limit) {
+            return {
+              skipped: true,
+              plan_limit: true,
+              reason: result.error,
+              brand_id: brandId,
+            };
+          }
+
           errorMessage = result.error || "Brand image optimization failed";
           if (!isLastAttempt) throw new Error(errorMessage);
           success = false;

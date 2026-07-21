@@ -10,7 +10,22 @@ const {
   buildJobImageMeta,
   handleOptimizationBatchComplete,
 } = require("../modules/imageOptimization/services");
+const {
+  pauseJobForPlanLimit,
+  MONTHLY_PLAN_LIMIT_MESSAGE,
+} = require("../modules/plans/service");
+const { getCurrentMonthQuotaStatus } = require("../utils/monthlyUsage");
 const { getJobAttempts, sleepBackoff } = require("../queue/workerJobOptions");
+
+/** Matches recordMonthlyOptimization — only full compress runs consume quota. */
+function imageResultConsumesQuota(result, settings) {
+  if (!result || result.skipped) return false;
+  const metadataOnly = Boolean(
+    result.metadataOnly || result.optimizedImage?.metadataOnly
+  );
+  if (metadataOnly) return false;
+  return Boolean(settings?.optimize_image_enabled);
+}
 
 /**
  * Optimize a single image (shared by per-image and batch BullMQ jobs).
@@ -197,6 +212,23 @@ async function processSingleImageOptimization({
     throw new Error(errMsg);
   }
 
+  const templatesOn = Boolean(
+    settings?.is_filename_template_enabled ||
+      settings?.is_alt_text_template_enabled
+  );
+  let resolvedImageMeta = imageMeta || {};
+  if (templatesOn && accessToken) {
+    resolvedImageMeta = await buildJobImageMeta({
+      storeHash,
+      productId,
+      imageId: Number(imageId),
+      accessToken,
+      settings,
+      storeOptions: {},
+      placementOverrides: imageMeta || {},
+    });
+  }
+
   let success = false;
   let resultData = null;
   let errorMessage = null;
@@ -210,7 +242,7 @@ async function processSingleImageOptimization({
       productId,
       imageUrl: resolvedUrl,
       settings,
-      imageMeta,
+      imageMeta: resolvedImageMeta,
       logContext,
       skipQuotaCheck,
     });
@@ -385,8 +417,29 @@ async function processOptimizationBatchJob(job) {
   let processed = 0;
   let skipped = 0;
   let failed = 0;
+  let planLimitHit = false;
+
+  // One quota read per batch; local counter avoids per-image DB lookups.
+  const batchQuota = storeHash ? await getCurrentMonthQuotaStatus(storeHash) : null;
+  const quotaUnlimited = Boolean(batchQuota?.unlimited);
+  let quotaRemaining = quotaUnlimited
+    ? null
+    : Math.max(0, Number(batchQuota?.remaining) || 0);
+
+  if (!quotaUnlimited && quotaRemaining <= 0) {
+    planLimitHit = true;
+  }
 
   for (const item of items) {
+    if (planLimitHit) {
+      break;
+    }
+
+    if (!quotaUnlimited && quotaRemaining <= 0) {
+      planLimitHit = true;
+      break;
+    }
+
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       try {
         const imageMeta = await buildJobImageMeta({
@@ -439,6 +492,15 @@ async function processOptimizationBatchJob(job) {
           skipped += 1;
         } else {
           processed += 1;
+          if (
+            !quotaUnlimited &&
+            imageResultConsumesQuota(result, settings)
+          ) {
+            quotaRemaining -= 1;
+            if (quotaRemaining <= 0) {
+              planLimitHit = true;
+            }
+          }
         }
         break;
       } catch (err) {
@@ -460,12 +522,53 @@ async function processOptimizationBatchJob(job) {
     }
   }
 
+  if (planLimitHit && jobUuid && storeHash) {
+    const monthlyLimit = batchQuota?.monthly_limit ?? null;
+    const monthlyUsed =
+      monthlyLimit != null
+        ? monthlyLimit - Math.max(0, quotaRemaining)
+        : batchQuota?.monthly_used ?? null;
+
+    await pauseJobForPlanLimit({
+      jobUuid,
+      storeHash,
+      evaluation: {
+        allowed: false,
+        code: "MONTHLY_QUOTA_EXCEEDED",
+        message: MONTHLY_PLAN_LIMIT_MESSAGE,
+        plan_slug: batchQuota?.usage?.plan_slug || null,
+        plan_limit: monthlyLimit,
+        monthly_used: monthlyUsed,
+        remaining: Math.max(0, quotaRemaining ?? 0),
+        images_to_queue: 0,
+        upgrade_required: true,
+      },
+    }).catch((err) => {
+      console.error("[image-optimization-worker] pause for plan limit:", err?.message);
+    });
+
+    await appendImageLog({
+      jobUuid,
+      storeHash,
+      jobType,
+      logType: "warning",
+      step: "plan_limit",
+      message: "Batch stopped — monthly plan limit reached",
+      meta: {
+        batch_index: batchIndex,
+        processed_in_batch: processed,
+        remaining_quota: Math.max(0, quotaRemaining ?? 0),
+      },
+    }).catch(() => {});
+  }
+
   const batchResult = {
     batchIndex,
     processed,
     skipped,
     failed,
     total: items.length,
+    plan_limit_hit: planLimitHit,
   };
 
   try {

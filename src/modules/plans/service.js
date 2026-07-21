@@ -5,6 +5,8 @@ const CategoryImageStatus = require("../../models/CategoryImageStatus");
 const BrandImageStatus = require("../../models/BrandImageStatus");
 const HomeBannerImage = require("../../models/HomeBannerImage");
 const ImageJob = require("../../models/ImageJob");
+const ImageJobItem = require("../../models/ImageJobItem");
+const ImageOptimization = require("../../models/ImageOptimization");
 const ImageOptimizationLog = require("../../models/ImageOptimizationLog");
 const User = require("../../models/User");
 const { notifyPlanLimitReached } = require("../../utils/planLimitNotify");
@@ -607,6 +609,101 @@ exports.pauseJobForPlanLimit = async ({
   skippedImages = 0,
   sendNotification = true,
 }) => {
+  if (jobUuid && storeHash) {
+    const pendingItems = await ImageJobItem.find({
+      job_uuid: jobUuid,
+      store_hash: storeHash,
+      status: { $in: ["queued", "optimizing"] },
+    })
+      .select({ product_id: 1, image_id: 1 })
+      .lean();
+
+    if (pendingItems.length > 0) {
+      const skipResult = await ImageJobItem.updateMany(
+        {
+          job_uuid: jobUuid,
+          store_hash: storeHash,
+          status: { $in: ["queued", "optimizing"] },
+        },
+        {
+          $set: {
+            status: "skipped",
+            skip_reason: "Monthly plan limit reached",
+            completed_at: new Date(),
+            error_message: null,
+          },
+        }
+      );
+
+      const clearedCount = Number(skipResult.modifiedCount) || 0;
+
+      const imageIds = pendingItems.map((row) => Number(row.image_id));
+      const optimizedRows = await ImageOptimization.find({
+        store_hash: storeHash,
+        image_id: { $in: imageIds },
+      })
+        .select({ product_id: 1, image_id: 1 })
+        .lean();
+
+      const optimizedKeys = new Set(
+        optimizedRows.map((row) => `${row.product_id}:${row.image_id}`)
+      );
+
+      const pairFilter = (rows) => ({
+        store_hash: storeHash,
+        status: { $in: ["pending", "optimizing"] },
+        $or: rows.map((row) => ({
+          product_id: row.product_id,
+          image_id: row.image_id,
+        })),
+      });
+
+      const revertOptimized = pendingItems.filter((row) =>
+        optimizedKeys.has(`${row.product_id}:${row.image_id}`)
+      );
+      const unstuckOptimizing = pendingItems.filter(
+        (row) => !optimizedKeys.has(`${row.product_id}:${row.image_id}`)
+      );
+
+      const statusOps = [];
+      if (revertOptimized.length > 0) {
+        statusOps.push(
+          ImageStatus.updateMany(pairFilter(revertOptimized), {
+            $set: { status: "optimized", image_update_status: "complete" },
+          })
+        );
+      }
+      if (unstuckOptimizing.length > 0) {
+        statusOps.push(
+          ImageStatus.updateMany(
+            {
+              ...pairFilter(unstuckOptimizing),
+              status: "optimizing",
+            },
+            {
+              $set: { status: "pending", image_update_status: "pending" },
+            }
+          )
+        );
+      }
+      if (statusOps.length > 0) {
+        await Promise.all(statusOps);
+      }
+
+      if (clearedCount > 0) {
+        await ImageJob.updateOne(
+          { job_uuid: jobUuid },
+          {
+            $inc: {
+              processed_images: clearedCount,
+              skipped_images: clearedCount,
+            },
+          }
+        );
+      }
+    }
+  }
+
   await ImageJob.updateOne(
     { job_uuid: jobUuid },
     {

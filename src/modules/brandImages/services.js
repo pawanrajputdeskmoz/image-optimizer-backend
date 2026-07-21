@@ -283,6 +283,13 @@ exports.optimizeBrandImageSingle = async ({
   await adjustPendingImages(storeHash, -1);
 
   if (!result.success) {
+    if (result.plan_limit) {
+      return {
+        success: false,
+        status: 403,
+        message: result.error || "Monthly image optimization limit reached",
+      };
+    }
     return { success: false, status: 500, message: result.error || "Brand image optimization failed" };
   }
 
@@ -603,6 +610,79 @@ async function registerPendingBrandImages(storeHash, brandIds = []) {
 }
 
 exports.registerPendingBrandImages = registerPendingBrandImages;
+
+exports.pauseBrandJobsForPlanLimit = async (storeHash, jobUuids = []) => {
+  const affectedJobUuids = [...new Set(jobUuids.filter(Boolean))];
+  if (!storeHash || affectedJobUuids.length === 0) {
+    return { error: null, cleared: 0 };
+  }
+
+  try {
+    const pendingItems = await BrandJobItem.find({
+      store_hash: storeHash,
+      job_uuid: { $in: affectedJobUuids },
+      status: { $in: ["queued", "optimizing"] },
+    })
+      .select({ brand_id: 1 })
+      .lean();
+
+    const brandIds = [...new Set(pendingItems.map((item) => item.brand_id))];
+    const now = new Date();
+
+    const [itemResult] = await Promise.all([
+      BrandJobItem.updateMany(
+        {
+          store_hash: storeHash,
+          job_uuid: { $in: affectedJobUuids },
+          status: { $in: ["queued", "optimizing"] },
+        },
+        {
+          $set: {
+            status: "skipped",
+            skip_reason: "Monthly plan limit reached",
+            error_message: null,
+            completed_at: now,
+          },
+        }
+      ),
+      BrandJob.updateMany(
+        {
+          store_hash: storeHash,
+          job_uuid: { $in: affectedJobUuids },
+          status: { $in: ["pending", "fetching", "processing"] },
+        },
+        {
+          $set: {
+            status: "paused_plan_limit",
+            completed_at: null,
+          },
+        }
+      ),
+      ...(brandIds.length > 0
+        ? [
+            BrandImageStatus.updateMany(
+              {
+                store_hash: storeHash,
+                brand_id: { $in: brandIds },
+                status: "optimizing",
+              },
+              {
+                $set: {
+                  status: "pending",
+                  image_update_status: "pending",
+                },
+              }
+            ),
+          ]
+        : []),
+    ]);
+
+    return { error: null, cleared: itemResult.modifiedCount || 0 };
+  } catch (err) {
+    console.error("[pauseBrandJobsForPlanLimit]", err.message);
+    return { error: err.message, cleared: 0 };
+  }
+};
 
 /**
  * Mark a single BrandJobItem as "optimizing" when the worker picks it up.

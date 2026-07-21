@@ -22,6 +22,7 @@ const {
   skipPendingJobItemsForImage,
 } = require("../services");
 const { recordMonthlyOptimization } = require("../../../utils/monthlyUsage");
+const { notifyPlanLimitReached } = require("../../../utils/planLimitNotify");
 const { appendImageLog, resolveJobUuid } = require("./imageActivityLog");
 const {
   replaceProductImage,
@@ -88,6 +89,12 @@ exports.compressImage = async ({
       .lean();
     const quota = await canOptimizeImages(storeHash, user?.selectedPlan || "free", 1);
     if (!quota.allowed) {
+      await notifyPlanLimitReached(storeHash, {
+        message: quota.message,
+        planName: quota.plan_name || quota.plan?.name || null,
+        monthlyLimit: quota.monthly_limit ?? null,
+        monthlyUsed: quota.monthly_used ?? null,
+      }).catch(() => {});
       const { clearStoreOptimizationJobs } = require("../../../queue/imageOptimizationQueues");
       await clearStoreOptimizationJobs(storeHash).catch((err) => {
         console.error("[compressImage] clearStoreOptimizationJobs:", err?.message);
@@ -112,8 +119,6 @@ exports.compressImage = async ({
     oldAltText = null,
     newImageName = null,
     newAltText = null,
-    runFilename = false,
-    runAltText = false,
     runOptimize: runOptimizeFromMeta,
     sortOrder = null,
     isThumbnail = null,
@@ -121,6 +126,8 @@ exports.compressImage = async ({
 
   const runOptimize =
     runOptimizeFromMeta ?? Boolean(settings?.optimize_image_enabled);
+  const runFilename = Boolean(settings?.is_filename_template_enabled);
+  const runAltText = Boolean(settings?.is_alt_text_template_enabled);
   const preservedOldAltText = normalizeUploadDescription(oldAltText) ?? null;
   const preservedNewAltText = runAltText
     ? normalizeUploadDescription(newAltText) ?? null
@@ -202,7 +209,9 @@ exports.compressImage = async ({
       if (sortOrder != null) metadataPayload.sortOrder = sortOrder;
       if (isThumbnail != null) metadataPayload.isThumbnail = isThumbnail;
       if (runFilename && newImageName) metadataPayload.imageFile = newImageName;
-      if (runAltText && newAltText) metadataPayload.description = newAltText;
+      if (runAltText && preservedNewAltText) {
+        metadataPayload.description = preservedNewAltText;
+      }
 
       if (Object.keys(metadataPayload).length > 0) {
         await updateBigCommerceProductImageMetadata({
@@ -498,6 +507,43 @@ exports.compressImage = async ({
       throw new Error(
         "BigCommerce upload succeeded but image URL could not be built"
       );
+    }
+
+    if (runFilename || runAltText) {
+      const metadataPayload = {};
+      if (sortOrder != null) metadataPayload.sortOrder = sortOrder;
+      if (isThumbnail != null) metadataPayload.isThumbnail = isThumbnail;
+      if (runFilename && newImageName) metadataPayload.imageFile = newImageName;
+      if (runAltText && preservedNewAltText) {
+        metadataPayload.description = preservedNewAltText;
+      }
+
+      if (Object.keys(metadataPayload).length > 0) {
+        const metadataResult = await updateBigCommerceProductImageMetadata({
+          storeHash,
+          productId,
+          imageId: newImageId,
+          accessToken,
+          ...metadataPayload,
+        });
+
+        if (metadataResult?.error) {
+          await logCompressActivity(
+            effectiveLogContext,
+            { storeHash, productId, imageId },
+            {
+              logType: "warning",
+              step: "metadata",
+              message:
+                "Optimized image uploaded but BigCommerce metadata sync failed",
+              meta: {
+                new_image_id: newImageId,
+                error: metadataResult.error,
+              },
+            }
+          );
+        }
+      }
     }
 
     // Activity logs are best-effort; do not block the response on them.

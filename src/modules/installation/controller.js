@@ -77,6 +77,8 @@ async function persistWebhookLog(webhook, fields) {
 exports.installApp = async (req, reply) => {
   const { code, context, scope } = req.query;
 
+  console.log("running....")
+
   if (!code || !context || !scope) {
     return reply.status(400).send({
       success: false,
@@ -84,9 +86,11 @@ exports.installApp = async (req, reply) => {
         "Missing required parameters: code, context, and scope are required",
     });
   }
+  console.log("running....", context)
 
   try {
     const data = await exchangeOAuthToken({ code, scope, context });
+  console.log("running....data ", data)
 
     const { access_token, user, context: storeHashData } = data;
     const storeHash = storeHashData?.replace("stores/", "") || null;
@@ -97,6 +101,7 @@ exports.installApp = async (req, reply) => {
         message: "Invalid OAuth context: store hash missing",
       });
     }
+    console.log("running.... 1`")
 
     const storeInfoResponse = await get(
       `https://api.bigcommerce.com/stores/${storeHash}/v2/store`,
@@ -107,7 +112,8 @@ exports.installApp = async (req, reply) => {
       }
     );
     const storeInfo = storeInfoResponse?.data || {};
-
+    console.log("running.... 2")
+ 
     await saveInstalledStore({
       storeHash,
       access_token,
@@ -120,6 +126,8 @@ exports.installApp = async (req, reply) => {
       storeHash,
       storeName: storeInfo.name || null,
     });
+    console.log("running.... 3")
+
 
     // Reinstall-safe: keep existing settings; create defaults only if missing
     await StoreOptimizationSettings.findOneAndUpdate(
@@ -141,7 +149,7 @@ exports.installApp = async (req, reply) => {
       },
       { upsert: true }
     );
-
+    console.log("running.... 4")
     queueWelcomeEmail({
       email: user?.email,
       storeName: storeInfo?.name || storeHash,
@@ -208,6 +216,7 @@ exports.uninstallApp = async (req, reply) => {
 exports.loadBigComApp = async (req, reply) => {
   try {
     const { signed_payload_jwt } = req.body;
+    console.log("running 11111")
 
     if (!signed_payload_jwt) {
       return reply.status(400).send({

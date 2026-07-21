@@ -14,6 +14,7 @@ const {
   resolveBrandJobUuid,
 } = require("./brandActivityLog");
 const { recordMonthlyOptimization } = require("../../../utils/monthlyUsage");
+const { notifyPlanLimitReached } = require("../../../utils/planLimitNotify");
 
 function clampQuality(quality, fallback = 80) {
   const q = Number(quality);
@@ -76,10 +77,24 @@ exports.compressBrandImage = async ({
       .lean();
     const quota = await canOptimizeImages(storeHash, user?.selectedPlan || "free", 1);
     if (!quota.allowed) {
-      const { clearStoreOptimizationJobs } = require("../../../queue/imageOptimizationQueues");
-      await clearStoreOptimizationJobs(storeHash).catch((err) => {
-        console.error("[compressBrandImage] clearStoreOptimizationJobs:", err?.message);
-      });
+      await notifyPlanLimitReached(storeHash, {
+        message: quota.message,
+        planName: quota.plan_name || quota.plan?.name || null,
+        monthlyLimit: quota.monthly_limit ?? null,
+        monthlyUsed: quota.monthly_used ?? null,
+      }).catch(() => {});
+
+      const {
+        clearStoreBrandOptimizationJobs,
+      } = require("../../../queue/brandImageQueue");
+      const { pauseBrandJobsForPlanLimit } = require("../services");
+      const clearedQueue = await clearStoreBrandOptimizationJobs(storeHash);
+      const affectedJobUuids = [
+        ...clearedQueue.jobUuids,
+        ...(logContext?.jobUuid ? [logContext.jobUuid] : []),
+      ];
+      await pauseBrandJobsForPlanLimit(storeHash, affectedJobUuids);
+
       return {
         success: false,
         plan_limit: true,

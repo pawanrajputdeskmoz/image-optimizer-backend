@@ -4,7 +4,8 @@ const BrandJob = require("../models/BrandJob");
 
 const BULK_ENTITY_TYPES = ["product", "category", "brand"];
 const RUNNING_JOB_STATUSES = ["pending", "fetching", "processing"];
-const BLOCKING_JOB_STATUSES = [...RUNNING_JOB_STATUSES, "paused_plan_limit"];
+/** Jobs that block a new bulk run — must be actively running, not quota-paused. */
+const BLOCKING_JOB_STATUSES = [...RUNNING_JOB_STATUSES];
 const FULL_BULK_OPTIMIZATION_JOB_TYPES = ["bulk"];
 const CHECKBOX_OPTIMIZATION_JOB_TYPES = ["checkBox"];
 const BULK_OPTIMIZATION_JOB_TYPES = [

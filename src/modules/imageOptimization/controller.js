@@ -70,8 +70,10 @@ const {
 const {
   canOptimizeImages,
   buildPlanLimitApiBody,
+  clearPausedPlanLimitJobs,
 } = require("../plans/service");
 const { adjustPendingImages } = require("../../utils/storePendingImages");
+const { notifyPlanLimitReached } = require("../../utils/planLimitNotify");
 
 /** Run an array of async tasks in sequential batches to avoid memory / Redis pressure. */
 async function batchAsync(items, batchSize, asyncFn) {
@@ -869,10 +871,13 @@ exports.singleImageOptimization = async (req, reply) => {
       { product_id: productId, image_id: imageId },
     ]);
 
-    const userPlan = req.currentUser?.selectedPlan || "free";
-    const quota = await canOptimizeImages(storeHash, userPlan, 1);
-    if (!quota.allowed) {
-      return reply.status(403).send(buildPlanLimitApiBody(quota));
+    const planLimitReply = await replyIfMonthlyPlanLimitExceeded(
+      reply,
+      storeHash,
+      req.currentUser?.selectedPlan
+    );
+    if (planLimitReply) {
+      return planLimitReply;
     }
 
     const result = await compressImage({
@@ -893,9 +898,6 @@ exports.singleImageOptimization = async (req, reply) => {
         ...placement,
       },
       logContext: null,
-      // Quota already checked above via canOptimizeImages — skip the
-      // duplicate User + quota lookup inside compressImage.
-      skipQuotaCheck: true,
     });
 
     // Single optimize has no job-item record step — consume pending here.
@@ -1009,6 +1011,8 @@ exports.bulkImageOptimization = async (req, reply) => {
         data: { settings },
       });
     }
+
+    await clearPausedPlanLimitJobs(storeHash).catch(() => {});
 
     const [planBlocked, bulkBlocked] = await Promise.all([
       replyIfMonthlyPlanLimitExceeded(reply, storeHash, req.currentUser?.selectedPlan),
@@ -1441,6 +1445,12 @@ exports.updateAltText = async (req, reply) => {
 async function replyIfMonthlyPlanLimitExceeded(reply, storeHash, selectedPlan) {
   const quota = await canOptimizeImages(storeHash, selectedPlan || "free", 1);
   if (!quota.allowed) {
+    await notifyPlanLimitReached(storeHash, {
+      message: quota.message,
+      planName: quota.plan_name || quota.plan?.name || null,
+      monthlyLimit: quota.monthly_limit ?? null,
+      monthlyUsed: quota.monthly_used ?? null,
+    }).catch(() => {});
     return reply.status(403).send(buildPlanLimitApiBody(quota));
   }
   return null;
@@ -1462,6 +1472,8 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
     }
 
     const storeHash = req.storeHash;
+
+    await clearPausedPlanLimitJobs(storeHash).catch(() => {});
 
     const [planBlocked, bulkBlocked] = await Promise.all([
       replyIfMonthlyPlanLimitExceeded(reply, storeHash, req.currentUser?.selectedPlan),
@@ -1703,12 +1715,11 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
       }
 
       if (paused) {
-        const quota = await canOptimizeImages(
+        return replyIfMonthlyPlanLimitExceeded(
+          reply,
           storeHash,
-          req.currentUser?.selectedPlan || "free",
-          1
+          req.currentUser?.selectedPlan
         );
-        return reply.status(403).send(buildPlanLimitApiBody(quota));
       }
 
       if (queueTier === TIER_HEAVY) {

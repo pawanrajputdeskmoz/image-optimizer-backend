@@ -9,7 +9,7 @@ const HomeBannerImage = require("../models/HomeBannerImage");
 const TYPE_COUNT_FIELDS = {
   product: "product_count",
   category: "category_count",
-  brand: "brand_count",
+  brand: "brand_count",  
   home_banner: "home_banner_count",
 };
 
@@ -201,14 +201,12 @@ async function recordMonthlyOptimization(
     { store_hash: storeHash, year, month },
     {
       $inc: inc,
-      $set: {
-        plan_slug: snapshot.plan_slug,
-        monthly_image_limit: snapshot.monthly_image_limit,
-      },
       $setOnInsert: {
         store_hash: storeHash,
         year,
         month,
+        plan_slug: snapshot.plan_slug,
+        monthly_image_limit: snapshot.monthly_image_limit,
       },
     },
     { upsert: true, returnDocument: "after" }
