@@ -81,12 +81,12 @@ async function startWorker() {
       const forceReoptimize = Boolean(job.data?.force || job.data?.force_reoptimize);
       if (!forceReoptimize) {
         const clientStatus = String(optimization_status || "").toLowerCase();
-        const alreadyOptimizedOnClient = ["optimized", "optimizing"].includes(clientStatus);
+        const currentlyOptimizingOnClient = clientStatus === "optimizing";
 
         const { skip, reason } = await shouldSkipBrandOptimization(storeHash, brandId);
 
-        if (skip || alreadyOptimizedOnClient) {
-          const skipMessage = reason || "Brand image is already optimized or currently optimizing";
+        if (skip || currentlyOptimizingOnClient) {
+          const skipMessage = reason || "Brand image is currently being optimized";
 
           if (jobUuid) {
             await recordBrandJobItemResult({

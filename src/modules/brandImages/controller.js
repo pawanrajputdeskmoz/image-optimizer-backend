@@ -33,6 +33,11 @@ const {
   buildBulkRestoreQueuedMessage,
 } = require("../../utils/bulkRestoreGuard");
 const { defaultWorkerJobOptions } = require("../../queue/workerJobOptions");
+const {
+  canOptimizeImages,
+  buildPlanLimitApiBody,
+} = require("../plans/service");
+const { notifyPlanLimitReached } = require("../../utils/planLimitNotify");
 
 exports.fetchAllBrands = async (req, reply) => {
   try {
@@ -473,6 +478,21 @@ async function queueBulkBrandJobs(req, reply, jobType, itemsOverride = null) {
 
     const storeHash = req.storeHash;
 
+    const quota = await canOptimizeImages(
+      storeHash,
+      req.currentUser?.selectedPlan || "free",
+      1
+    );
+    if (!quota.allowed) {
+      await notifyPlanLimitReached(storeHash, {
+        message: quota.message,
+        planName: quota.plan_name || quota.plan?.name || null,
+        monthlyLimit: quota.monthly_limit ?? null,
+        monthlyUsed: quota.monthly_used ?? null,
+      }).catch(() => {});
+      return reply.status(403).send(buildPlanLimitApiBody(quota));
+    }
+
     if (
       isFullBulkOptimizationJobType(jobType) &&
       (await replyIfBulkOptimizationBlocked(reply, storeHash, "brand"))
@@ -564,13 +584,13 @@ async function queueBulkBrandJobs(req, reply, jobType, itemsOverride = null) {
 
       const imageUrl = String(imageUrlRaw).trim();
       const clientStatus = String(item.optimization_status || item.status || "").toLowerCase();
-      const alreadyOptimizedOnClient = ["optimized", "optimizing"].includes(clientStatus);
+      const currentlyOptimizingOnClient = clientStatus === "optimizing";
 
       if (
         !forceReoptimize &&
-        (skipOptimizedIds.has(Number(brandId)) || alreadyOptimizedOnClient)
+        (skipOptimizedIds.has(Number(brandId)) || currentlyOptimizingOnClient)
       ) {
-        pushSkipped("Brand image is already optimized or currently optimizing");
+        pushSkipped("Brand image is currently being optimized");
         continue;
       }
 

@@ -48,6 +48,13 @@ const PlanSchema = new mongoose.Schema(
       default: 0,
       index: true,
     },
+    /** PayPal Billing Plans id — used for subscriptions. */
+    paypal_plan_id: {
+      type: String,
+      trim: true,
+      default: null,
+      index: true,
+    },
   },
   {
     timestamps: {

@@ -592,9 +592,6 @@ exports.shouldSkipImageOptimization = async (
   const {
     accessToken = null,
     forceReoptimize = false,
-    usePrefetched = false,
-    prefetchedStatusRow = null,
-    prefetchedOptimizationRow = null,
   } = options;
   const iid = Number(imageId);
   if (!storeHash || !Number.isFinite(iid)) {
@@ -624,12 +621,10 @@ exports.shouldSkipImageOptimization = async (
     optimizationQuery.product_id = pid;
   }
 
-  const [statusRow, optimizationRow] = usePrefetched
-    ? [prefetchedStatusRow, prefetchedOptimizationRow]
-    : await Promise.all([
-        ImageStatus.findOne(statusQuery).select({ status: 1 }).lean(),
-        ImageOptimization.findOne(optimizationQuery).select({ _id: 1 }).lean(),
-      ]);
+  const [statusRow, optimizationRow] = await Promise.all([
+    ImageStatus.findOne(statusQuery).select({ status: 1 }).lean(),
+    ImageOptimization.findOne(optimizationQuery).select({ _id: 1 }).lean(),
+  ]);
 
   if (statusRow) {
     const optimizing = statusRow.status === "optimizing";
@@ -700,6 +695,8 @@ async function finalizeOptimizationJobIfComplete(job, jobTypeHint = "bulk") {
       { $set: { status: finalStatus, completed_at: new Date() } }
     ),
     ImageOptimizationLog.create({
+      user_id: job.user_id || null,
+      job_id: job._id,
       job_uuid: job.job_uuid,
       store_hash: job.store_hash,
       job_type: job.job_type || validJobType,
@@ -1168,6 +1165,8 @@ exports.streamCatalogFetchToJobItems = async ({
  */
 exports.queueOptimizationBatchJobs = async ({
   jobUuid,
+  userId = null,
+  jobId = null,
   batchCount,
   storeHash,
   storeUrl,
@@ -1199,6 +1198,8 @@ exports.queueOptimizationBatchJobs = async ({
 
   return exports.dispatchOptimizationBatch({
     jobUuid,
+    userId,
+    jobId,
     batchIndex: 0,
     batchCount,
     storeHash,
@@ -1219,6 +1220,8 @@ exports.queueOptimizationBatchJobs = async ({
  */
 exports.dispatchOptimizationBatch = async ({
   jobUuid,
+  userId = null,
+  jobId = null,
   batchIndex = 0,
   batchCount = null,
   storeHash,
@@ -1292,6 +1295,8 @@ exports.dispatchOptimizationBatch = async ({
 
   const payload = {
     jobUuid,
+    userId: userId || job.user_id || null,
+    jobId: jobId || job._id,
     job_type,
     storeHash,
     storeUrl,
@@ -2095,7 +2100,9 @@ exports.getOptimizationJobStatus = async (jobUuid, storeHash, options = {}) => {
     items_pagination: {
       page: itemPage,
       limit: itemLimit,
-      total: Number(job.total_images) || 0,
+      total: null,
+      requested_total: Number(job.total_images) || 0,
+      has_more: items.length === itemLimit,
       next_cursor:
         items.length === itemLimit ? String(items[items.length - 1]._id) : null,
     },
@@ -2223,6 +2230,8 @@ exports.recordOptimizationJobImageResult = async ({
     const queued = getQueuedImageCount(job);
     const logWrites = [
       ImageOptimizationLog.create({
+        user_id: job.user_id || null,
+        job_id: job._id,
         job_uuid: jobUuid,
         store_hash: job.store_hash,
         job_type: job.job_type || validJobType,
@@ -2264,6 +2273,8 @@ exports.recordOptimizationJobImageResult = async ({
           { $set: { status: finalStatus, completed_at: new Date() } }
         ),
         ImageOptimizationLog.create({
+          user_id: job.user_id || null,
+          job_id: job._id,
           job_uuid: jobUuid,
           store_hash: job.store_hash,
           job_type: job.job_type || validJobType,
@@ -2564,6 +2575,8 @@ exports.recordRestoreJobImageResult = async ({
     const queued = getQueuedImageCount(job);
     const logWrites = [
       ImageOptimizationLog.create({
+        user_id: job.user_id || null,
+        job_id: job._id,
         job_uuid: jobUuid,
         store_hash: job.store_hash,
         job_type: job.job_type || validJobType,
@@ -2594,6 +2607,8 @@ exports.recordRestoreJobImageResult = async ({
           { $set: { status: finalStatus, completed_at: new Date() } }
         ),
         ImageOptimizationLog.create({
+          user_id: job.user_id || null,
+          job_id: job._id,
           job_uuid: jobUuid,
           store_hash: job.store_hash,
           job_type: job.job_type || validJobType,

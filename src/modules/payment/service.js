@@ -1,6 +1,8 @@
 const axios = require("axios");
 const config = require("../../config");
 const PaymentHistory = require("../../models/PaymentHistory");
+const Plan = require("../../models/Plan");
+const ClientPlan = require("../../models/ClientPlan");
 const {
   getPlanBySlug,
   getEffectivePlanForStore,
@@ -126,8 +128,6 @@ exports.createPlanOrder = async (storeHash, planId, userId = null) => {
       return { error: "PayPal did not return a valid order", code: "PAYPAL_ORDER_FAILED", statusCode: 502 };
     }
 
-    // Clean up this store's leftover PENDING records for the current month before
-    // creating a new one: expire the stale ones (>3h old) and drop recent duplicates.
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const threeHoursAgo = new Date(now.getTime() - 3 * 60 * 60 * 1000);
@@ -169,7 +169,6 @@ exports.createPlanOrder = async (storeHash, planId, userId = null) => {
 
 /**
  * Capture an approved PayPal order, activate the plan, and finalize payment history.
- * The plan is read from the stored payment record (not the client) to prevent tampering.
  */
 exports.capturePlanOrder = async (storeHash, paypalOrderId) => {
   const orderId = String(paypalOrderId || "").trim();
@@ -217,7 +216,6 @@ exports.capturePlanOrder = async (storeHash, paypalOrderId) => {
       return { error: "PayPal payment was not completed", code: "PAYMENT_NOT_COMPLETED", statusCode: 402 };
     }
 
-    // Atomically move PENDING -> COMPLETED to guard against double capture.
     const finalized = await PaymentHistory.findOneAndUpdate(
       { _id: record._id, status: "PENDING" },
       {
@@ -237,7 +235,6 @@ exports.capturePlanOrder = async (storeHash, paypalOrderId) => {
       return { error: "Payment has already been captured", code: "ALREADY_CAPTURED", statusCode: 409 };
     }
 
-    // Activate the paid plan (assigns ClientPlan, updates selectedPlan, syncs quota).
     const upgrade = await upgradeStorePlan(storeHash, record.plan_slug);
 
     return {
@@ -283,4 +280,273 @@ exports.listPaymentHistory = async (storeHash) => {
     paid_at: row.paid_at,
     created_at: row.created_at,
   }));
+};
+
+/**
+ * Create a PayPal billing subscription for a paid plan that has paypal_plan_id.
+ */
+exports.createSubscription = async (storeHash, planId) => {
+  const slug = String(planId || "").trim().toLowerCase();
+  if (!storeHash || !slug) {
+    return { error: "planId is required", code: "INVALID_REQUEST", statusCode: 400 };
+  }
+
+  const plan = await Plan.findOne({ slug, is_active: true }).lean();
+  if (!plan) {
+    return { error: "Plan not found", code: "PLAN_NOT_FOUND", statusCode: 404 };
+  }
+  if (!plan.paypal_plan_id) {
+    return {
+      error: "Plan is not registered on PayPal yet. Ask admin to update the plan price.",
+      code: "PAYPAL_PLAN_MISSING",
+      statusCode: 400,
+    };
+  }
+  if (!(Number(plan.price) > 0)) {
+    return { error: "This plan does not require payment", code: "FREE_PLAN", statusCode: 400 };
+  }
+
+  try {
+    const accessToken = await getPaypalAccessToken();
+    const { baseUrl, subscriptionReturnUrl, subscriptionCancelUrl } = config.paypal;
+
+    const { data, status } = await axios.post(
+      `${baseUrl}/v1/billing/subscriptions`,
+      {
+        plan_id: plan.paypal_plan_id,
+        custom_id: storeHash,
+        application_context: {
+          brand_name: "Image Optimizer",
+          user_action: "SUBSCRIBE_NOW",
+          return_url: subscriptionReturnUrl,
+          cancel_url: subscriptionCancelUrl,
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 30_000,
+        validateStatus: () => true,
+      }
+    );
+
+    if (status >= 400 || !data?.id) {
+      return {
+        error: data?.message || data?.name || "PayPal subscription create failed",
+        code: "PAYPAL_SUBSCRIPTION_FAILED",
+        statusCode: 502,
+        data,
+      };
+    }
+
+    const approvalUrl = data?.links?.find((l) => l.rel === "approve")?.href || null;
+    return {
+      error: null,
+      statusCode: status,
+      data,
+      subscriptionId: data.id,
+      approvalUrl,
+    };
+  } catch (err) {
+    return {
+      error: paypalErrorMessage(err),
+      code: "PAYPAL_SUBSCRIPTION_FAILED",
+      statusCode: 502,
+    };
+  }
+};
+
+/**
+ * Verify PayPal webhook signature and apply subscription lifecycle events.
+ * ClientPlan is unique on store_hash — always upsert/update that single row.
+ */
+exports.handlePaypalWebhook = async (headers, event) => {
+  if (!event || typeof event !== "object") {
+    return { error: "Invalid webhook body", statusCode: 400 };
+  }
+
+  const webhookId = config.paypal.webhookId;
+  if (!webhookId) {
+    return { error: "PAYPAL_WEBHOOK_ID is not configured", statusCode: 500 };
+  }
+
+  try {
+    const accessToken = await getPaypalAccessToken();
+    const { baseUrl } = config.paypal;
+
+    const { data: verification } = await axios.post(
+      `${baseUrl}/v1/notifications/verify-webhook-signature`,
+      {
+        auth_algo: headers["paypal-auth-algo"],
+        cert_url: headers["paypal-cert-url"],
+        transmission_id: headers["paypal-transmission-id"],
+        transmission_sig: headers["paypal-transmission-sig"],
+        transmission_time: headers["paypal-transmission-time"],
+        webhook_id: webhookId,
+        webhook_event: event,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 30_000,
+      }
+    );
+
+    if (verification?.verification_status !== "SUCCESS") {
+      console.warn("[paypal-webhook] invalid signature", verification);
+      return { error: "invalid signature", statusCode: 400 };
+    }
+
+    const resource = event.resource || {};
+    const storeHash = String(resource.custom_id || "").trim() || null;
+    const subscriptionId = resource.id || null;
+    const paypalPlanId = resource.plan_id || null;
+    const eventType = event.event_type;
+
+    if (eventType === "BILLING.SUBSCRIPTION.ACTIVATED") {
+      if (!storeHash || !subscriptionId || !paypalPlanId) {
+        return { error: null, received: true };
+      }
+
+      const plan = await Plan.findOne({ paypal_plan_id: paypalPlanId }).lean();
+      if (!plan) {
+        return { error: null, received: true };
+      }
+
+      await upgradeStorePlan(storeHash, plan.slug);
+
+      await ClientPlan.findOneAndUpdate(
+        { store_hash: storeHash },
+        {
+          $set: {
+            base_plan_slug: plan.slug,
+            plan_id: plan._id,
+            assigned_by: "client",
+            started_at: new Date(),
+            paypal_subscription_id: subscriptionId,
+            paypal_plan_id: paypalPlanId,
+            subscription_status: "active",
+          },
+          $setOnInsert: { store_hash: storeHash },
+        },
+        { upsert: true }
+      );
+    } else if (eventType === "BILLING.SUBSCRIPTION.CANCELLED") {
+      if (!subscriptionId && !storeHash) {
+        return { error: null, received: true };
+      }
+
+      await ClientPlan.findOneAndUpdate(
+        subscriptionId
+          ? { paypal_subscription_id: subscriptionId }
+          : { store_hash: storeHash },
+        { $set: { subscription_status: "cancel" } }
+      );
+    } else if (eventType === "BILLING.SUBSCRIPTION.RE-ACTIVATED") {
+      const or = [];
+      if (subscriptionId) or.push({ paypal_subscription_id: subscriptionId });
+      if (storeHash) or.push({ store_hash: storeHash });
+
+      const clientPlan = or.length
+        ? await ClientPlan.findOne(or.length === 1 ? or[0] : { $or: or }).lean()
+        : null;
+
+      const resolvedStoreHash = storeHash || clientPlan?.store_hash || null;
+      const resolvedPaypalPlanId = paypalPlanId || clientPlan?.paypal_plan_id || null;
+      if (!resolvedStoreHash || !subscriptionId) {
+        return { error: null, received: true };
+      }
+
+      let plan = null;
+      if (resolvedPaypalPlanId) {
+        plan = await Plan.findOne({ paypal_plan_id: resolvedPaypalPlanId }).lean();
+      } else if (clientPlan?.base_plan_slug) {
+        plan = await Plan.findOne({ slug: clientPlan.base_plan_slug, is_active: true }).lean();
+      }
+      if (!plan) {
+        return { error: null, received: true };
+      }
+
+      await upgradeStorePlan(resolvedStoreHash, plan.slug);
+
+      await ClientPlan.findOneAndUpdate(
+        { store_hash: resolvedStoreHash },
+        {
+          $set: {
+            base_plan_slug: plan.slug,
+            plan_id: plan._id,
+            assigned_by: "client",
+            paypal_subscription_id: subscriptionId,
+            paypal_plan_id: resolvedPaypalPlanId || plan.paypal_plan_id || null,
+            subscription_status: "active",
+          },
+          $setOnInsert: {
+            store_hash: resolvedStoreHash,
+            started_at: new Date(),
+          },
+        },
+        { upsert: true }
+      );
+    } else if (eventType === "BILLING.SUBSCRIPTION.UPDATED") {
+      const filter = subscriptionId
+        ? { paypal_subscription_id: subscriptionId }
+        : storeHash
+          ? { store_hash: storeHash }
+          : null;
+      if (!filter) {
+        return { error: null, received: true };
+      }
+
+      const $set = {};
+      if (subscriptionId) $set.paypal_subscription_id = subscriptionId;
+      if (paypalPlanId) $set.paypal_plan_id = paypalPlanId;
+
+      const paypalStatus = String(resource.status || "").toUpperCase();
+      if (paypalStatus === "ACTIVE") $set.subscription_status = "active";
+      if (paypalStatus === "CANCELLED" || paypalStatus === "CANCELED") {
+        $set.subscription_status = "cancel";
+      }
+
+      if (paypalPlanId) {
+        const plan = await Plan.findOne({ paypal_plan_id: paypalPlanId }).lean();
+        if (plan) {
+          $set.base_plan_slug = plan.slug;
+          $set.plan_id = plan._id;
+        }
+      }
+
+      if (Object.keys($set).length > 0) {
+        await ClientPlan.findOneAndUpdate(filter, { $set });
+      }
+    }
+
+    return { error: null, received: true };
+  } catch (err) {
+    console.error("[paypal-webhook]", err);
+    return { error: paypalErrorMessage(err), statusCode: 500 };
+  }
+};
+
+/** Poll whether a PayPal subscription is active for this store. */
+exports.getSubscriptionStatus = async (storeHash, subscriptionId) => {
+  const id = String(subscriptionId || "").trim();
+  if (!storeHash || !id) {
+    return { error: "subscription id is required", statusCode: 400, status: null };
+  }
+
+  const clientPlan = await ClientPlan.findOne({
+    store_hash: storeHash,
+    paypal_subscription_id: id,
+  })
+    .select({ subscription_status: 1 })
+    .lean();
+
+  return {
+    error: null,
+    status: clientPlan?.subscription_status === "active" ? "active" : "cancel",
+  };
 };

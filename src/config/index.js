@@ -211,9 +211,12 @@ module.exports = {
     return {
       clientId: envString("PAYPAL_CLIENT_ID", ""),
       clientSecret: envString("PAYPAL_CLIENT_SECRET", ""),
+      webhookId: envString("PAYPAL_WEBHOOK_ID", ""),
       baseUrl: isLive ? "https://api-m.paypal.com" : "https://api-m.sandbox.paypal.com",
       returnUrl: `${frontendUrl}/payment/success`,
       cancelUrl: `${frontendUrl}/payment/cancel`,
+      subscriptionReturnUrl: `${frontendUrl}/paypal/subscription-return`,
+      subscriptionCancelUrl: `${frontendUrl}/paypal/subscription-cancel`,
     };
   })(),
 

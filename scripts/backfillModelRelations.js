@@ -6,6 +6,15 @@ loadEnv();
 const models = require("../src/models");
 const storeArg = process.argv.find((arg) => arg.startsWith("--store="));
 const selectedStoreHash = storeArg ? storeArg.slice("--store=".length).trim() : null;
+const batchArg = process.argv.find((arg) => arg.startsWith("--batch-size="));
+const relationBatchSize = Math.min(
+  50_000,
+  Math.max(
+    100,
+    Number(batchArg?.slice("--batch-size=".length) || process.env.RELATION_BATCH_SIZE) ||
+      5_000
+  )
+);
 
 const storeOwnedModels = [
   models.BrandImage,
@@ -55,36 +64,67 @@ async function mergeLookup({
   if (sort) lookupPipeline.push({ $sort: sort });
   lookupPipeline.push({ $limit: 1 });
 
-  await sourceModel.collection
-    .aggregate(
-      [
-        { $match: scopedSourceMatch },
-        {
-          $lookup: {
-            from: targetModel.collection.name,
-            let: letFields,
-            pipeline: lookupPipeline,
-            as: "_relation",
-          },
-        },
-        { $set: { _relation: { $first: "$_relation" } } },
-        { $match: { "_relation._id": { $exists: true } } },
-        { $set: setFields },
-        { $unset: "_relation" },
-        {
-          $merge: {
-            into: sourceModel.collection.name,
-            on: "_id",
-            whenMatched: "merge",
-            whenNotMatched: "discard",
-          },
-        },
-      ],
-      { allowDiskUse: true }
-    )
-    .toArray();
+  let afterId = null;
+  let processed = 0;
 
-  console.log(`[relations] ${sourceModel.modelName} updated`);
+  while (true) {
+    const batchMatch = afterId
+      ? { $and: [scopedSourceMatch, { _id: { $gt: afterId } }] }
+      : scopedSourceMatch;
+    const candidates = await sourceModel.collection
+      .find(batchMatch, { projection: { _id: 1 } })
+      .sort({ _id: 1 })
+      .limit(relationBatchSize)
+      .toArray();
+
+    if (candidates.length === 0) break;
+
+    const firstId = candidates[0]._id;
+    const lastId = candidates[candidates.length - 1]._id;
+    await sourceModel.collection
+      .aggregate(
+        [
+          {
+            $match: {
+              $and: [
+                scopedSourceMatch,
+                { _id: { $gte: firstId, $lte: lastId } },
+              ],
+            },
+          },
+          {
+            $lookup: {
+              from: targetModel.collection.name,
+              let: letFields,
+              pipeline: lookupPipeline,
+              as: "_relation",
+            },
+          },
+          { $set: { _relation: { $first: "$_relation" } } },
+          { $match: { "_relation._id": { $exists: true } } },
+          { $set: setFields },
+          { $unset: "_relation" },
+          {
+            $merge: {
+              into: sourceModel.collection.name,
+              on: "_id",
+              whenMatched: "merge",
+              whenNotMatched: "discard",
+            },
+          },
+        ],
+        { allowDiskUse: true, maxTimeMS: 15 * 60 * 1000 }
+      )
+      .toArray();
+
+    processed += candidates.length;
+    afterId = lastId;
+    console.log(
+      `[relations] ${sourceModel.modelName}: ${processed} candidates processed`
+    );
+  }
+
+  console.log(`[relations] ${sourceModel.modelName} complete`);
 }
 
 async function backfillStoreOwners() {
@@ -235,6 +275,70 @@ async function backfillImages() {
   });
 }
 
+async function backfillWebhookSequences(eventModel, logModel) {
+  const baseMatch = selectedStoreHash
+    ? { store_hash: selectedStoreHash }
+    : {};
+  let afterId = null;
+  let processed = 0;
+
+  while (true) {
+    const match = afterId
+      ? { ...baseMatch, _id: { $gt: afterId } }
+      : baseMatch;
+    const candidates = await eventModel.collection
+      .find(match, { projection: { _id: 1 } })
+      .sort({ _id: 1 })
+      .limit(relationBatchSize)
+      .toArray();
+    if (candidates.length === 0) break;
+
+    const firstId = candidates[0]._id;
+    const lastId = candidates[candidates.length - 1]._id;
+    await eventModel.collection
+      .aggregate(
+        [
+          {
+            $match: {
+              ...baseMatch,
+              _id: { $gte: firstId, $lte: lastId },
+            },
+          },
+          {
+            $lookup: {
+              from: logModel.collection.name,
+              localField: "_id",
+              foreignField: "webhook_event_id",
+              pipeline: [
+                { $group: { _id: null, sequence: { $max: "$sequence" } } },
+              ],
+              as: "_logs",
+            },
+          },
+          { $set: { _logs: { $first: "$_logs" } } },
+          { $set: { log_sequence: { $ifNull: ["$_logs.sequence", 0] } } },
+          { $unset: "_logs" },
+          {
+            $merge: {
+              into: eventModel.collection.name,
+              on: "_id",
+              whenMatched: "merge",
+              whenNotMatched: "discard",
+            },
+          },
+        ],
+        { allowDiskUse: true, maxTimeMS: 15 * 60 * 1000 }
+      )
+      .toArray();
+
+    processed += candidates.length;
+    afterId = lastId;
+    console.log(
+      `[relations] ${eventModel.modelName} sequences: ${processed} processed`
+    );
+  }
+}
+
 async function backfillWebhooks() {
   const webhookLinks = [
     [models.StoreWebhookEvent, models.StoreWebhook],
@@ -292,43 +396,46 @@ async function backfillWebhooks() {
       },
     });
 
-    await eventModel.collection
-      .aggregate(
-        [
-          {
-            $lookup: {
-              from: logModel.collection.name,
-              localField: "_id",
-              foreignField: "webhook_event_id",
-              pipeline: [
-                { $group: { _id: null, sequence: { $max: "$sequence" } } },
-              ],
-              as: "_logs",
-            },
-          },
-          { $set: { _logs: { $first: "$_logs" } } },
-          { $set: { log_sequence: { $ifNull: ["$_logs.sequence", 0] } } },
-          { $unset: "_logs" },
-          {
-            $merge: {
-              into: eventModel.collection.name,
-              on: "_id",
-              whenMatched: "merge",
-              whenNotMatched: "discard",
-            },
-          },
-        ],
-        { allowDiskUse: true }
-      )
-      .toArray();
+    await backfillWebhookSequences(eventModel, logModel);
   }
 }
 
 async function createIndexes() {
+  try {
+    await models.HomeBannerImage.collection.dropIndex(
+      "store_hash_1_channel_id_1_widget_uuid_1_image_path_in_config_1"
+    );
+  } catch (error) {
+    if (![26, 27].includes(error?.code)) throw error;
+  }
+
   for (const model of Object.values(models)) {
     if (!model?.createIndexes || !model?.modelName) continue;
     await model.createIndexes();
     console.log(`[indexes] ${model.modelName} ready`);
+  }
+
+  const obsoleteIndexes = [
+    [models.ImageStatus, "store_hash_1_status_1"],
+    [models.CategoryImageStatus, "store_hash_1_status_1"],
+    [models.BrandImageStatus, "store_hash_1_status_1"],
+    [models.ImageJob, "store_hash_1_status_1"],
+    [models.CategoryJob, "store_hash_1_status_1"],
+    [models.BrandJob, "store_hash_1_status_1"],
+    [models.ImageJobItem, "job_uuid_1_batch_index_1"],
+    [models.ImageJobItem, "job_uuid_1_created_at_1__id_1"],
+    [models.CategoryJobItem, "job_uuid_1_created_at_1__id_1"],
+    [models.BrandJobItem, "job_uuid_1_created_at_1__id_1"],
+  ];
+
+  for (const [model, indexName] of obsoleteIndexes) {
+    if (!model) continue;
+    try {
+      await model.collection.dropIndex(indexName);
+      console.log(`[indexes] ${model.modelName}.${indexName} removed`);
+    } catch (error) {
+      if (![26, 27].includes(error?.code)) throw error;
+    }
   }
 }
 

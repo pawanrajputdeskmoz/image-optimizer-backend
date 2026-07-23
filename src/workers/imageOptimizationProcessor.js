@@ -1,7 +1,5 @@
 const ImageJobItem = require("../models/ImageJobItem");
 const ImageOldData = require("../models/ImageOldData");
-const ImageStatus = require("../models/ImageStatus");
-const ImageOptimization = require("../models/ImageOptimization");
 const { compressImage } = require("../modules/imageOptimization/utils/compressImage");
 const { resolveProductImageUrl } = require("../modules/imageOptimization/utils/urls");
 const {
@@ -51,9 +49,6 @@ async function processSingleImageOptimization({
   maxAttempts = 1,
   attemptsMade = 0,
   skipQuotaCheck = false,
-  usePrefetched = false,
-  prefetchedStatusRow = null,
-  prefetchedOptimizationRow = null,
 }) {
   console.log("[image-optimization-worker] process start", {
     jobUuid,
@@ -144,9 +139,6 @@ async function processSingleImageOptimization({
       {
         accessToken,
         forceReoptimize,
-        usePrefetched,
-        prefetchedStatusRow,
-        prefetchedOptimizationRow,
       }
     );
     const skipBlocks =
@@ -438,33 +430,25 @@ async function processOptimizationBatchJob(job) {
     return { batchIndex, processed: 0, skipped: 0, failed: 0 };
   }
 
-  const productIds = [...new Set(items.map((item) => Number(item.product_id)))];
-  const imageIds = [...new Set(items.map((item) => Number(item.image_id)))];
-  const relationFilter = {
+  const pairFilter = {
     store_hash: storeHash,
-    product_id: { $in: productIds },
-    image_id: { $in: imageIds },
+    $or: items.map((item) => ({
+      product_id: Number(item.product_id),
+      image_id: Number(item.image_id),
+    })),
   };
-  const [savedRows, statusRows, optimizationRows] = await Promise.all([
-    ImageOldData.find(relationFilter)
-      .select({ product_id: 1, image_id: 1, imageName: 1, altText: 1, newImageName: 1, newAltText: 1 })
-      .lean(),
-    ImageStatus.find({
-      ...relationFilter,
-      status: { $in: ["optimized", "optimizing"] },
+  const savedRows = await ImageOldData.find(pairFilter)
+    .select({
+      product_id: 1,
+      image_id: 1,
+      imageName: 1,
+      altText: 1,
+      newImageName: 1,
+      newAltText: 1,
     })
-      .select({ product_id: 1, image_id: 1, status: 1 })
-      .lean(),
-    ImageOptimization.find(relationFilter)
-      .select({ product_id: 1, image_id: 1 })
-      .lean(),
-  ]);
+    .lean();
   const rowKey = (row) => `${Number(row.product_id)}:${Number(row.image_id)}`;
   const savedImageDataMap = new Map(savedRows.map((row) => [rowKey(row), row]));
-  const statusMap = new Map(statusRows.map((row) => [rowKey(row), row]));
-  const optimizationMap = new Map(
-    optimizationRows.map((row) => [rowKey(row), row])
-  );
 
   const productContextCache = new Map();
   const storeOptions = { currency, store_name };
@@ -543,9 +527,6 @@ async function processOptimizationBatchJob(job) {
           maxAttempts,
           attemptsMade: attempt,
           skipQuotaCheck: Boolean(job.data?.skipQuotaCheck),
-          usePrefetched: true,
-          prefetchedStatusRow: statusMap.get(rowKey(item)) || null,
-          prefetchedOptimizationRow: optimizationMap.get(rowKey(item)) || null,
         });
 
         if (result?.skipped) {

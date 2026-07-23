@@ -100,7 +100,6 @@ CategoryJobItemSchema.index(
 CategoryJobItemSchema.index({ job_uuid: 1, status: 1 });
 CategoryJobItemSchema.index({ store_hash: 1, job_uuid: 1, status: 1 });
 CategoryJobItemSchema.index({ status: 1, completed_at: 1 });
-CategoryJobItemSchema.index({ job_uuid: 1, created_at: 1, _id: 1 });
 CategoryJobItemSchema.index({ job_uuid: 1, _id: 1 });
 CategoryJobItemSchema.index(
   { job_id: 1, status: 1, created_at: 1 },

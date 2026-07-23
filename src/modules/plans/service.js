@@ -99,6 +99,7 @@ function formatPlan(plan) {
       plan.monthly_image_limit == null ? null : Number(plan.monthly_image_limit),
     is_active: Boolean(plan.is_active),
     display_order: Number(plan.display_order) || 0,
+    paypal_plan_id: plan.paypal_plan_id || null,
     created_at: plan.created_at || null,
     updated_at: plan.updated_at || null,
   };

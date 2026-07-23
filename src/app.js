@@ -101,6 +101,9 @@ function isOriginAllowed(origin, allowedOrigins) {
   if (origin.endsWith(".shares.zrok.io") && allowedOrigins.includes("*.shares.zrok.io")) {
     return true;
   }
+  if (origin.endsWith(".trycloudflare.com") && allowedOrigins.includes("*.trycloudflare.com")) {
+    return true;
+  }
 
   if (process.env.NODE_ENV === "development") {
     try {

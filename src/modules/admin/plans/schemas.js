@@ -9,6 +9,7 @@ const planSchema = {
     monthly_image_limit: { anyOf: [{ type: "null" }, { type: "number" }] },
     is_active: { type: "boolean" },
     display_order: { type: "number" },
+    paypal_plan_id: { anyOf: [{ type: "null" }, { type: "string" }] },
     created_at: { anyOf: [{ type: "null" }, { type: "string" }] },
     updated_at: { anyOf: [{ type: "null" }, { type: "string" }] },
   },

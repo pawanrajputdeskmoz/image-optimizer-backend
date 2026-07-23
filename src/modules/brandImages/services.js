@@ -19,7 +19,7 @@ const {
 const config = require("../../config");
 const { adjustPendingImages } = require("../../utils/storePendingImages");
 
-const SKIP_BRAND_STATUSES = new Set(["optimized", "optimizing"]);
+const SKIP_BRAND_STATUSES = new Set(["optimizing"]);
 const SKIP_PENDING_BRAND_STATUSES = new Set(["optimized", "optimizing", "pending"]);
 const RESTORE_SUCCESS_STATUSES = new Set(["restored"]);
 
@@ -177,22 +177,22 @@ async function shouldSkipBrandOptimization(storeHash, brandId, { force = false, 
   if (force) return { skip: false };
 
   const normalizedClientStatus = String(clientStatus || "").toLowerCase();
-  if (["optimized", "optimizing"].includes(normalizedClientStatus)) {
+  if (normalizedClientStatus === "optimizing") {
     return {
       skip: true,
-      reason: "Brand image is already optimized or currently optimizing",
+      reason: "Brand image is currently being optimized",
     };
   }
 
   const statusRow = await BrandImageStatus.findOne(
-    { store_hash: storeHash, brand_id: brandId, status: { $in: ["optimized", "optimizing"] } },
+    { store_hash: storeHash, brand_id: brandId, status: "optimizing" },
     { status: 1 }
   ).lean();
 
   if (statusRow) {
     return {
       skip: true,
-      reason: "Brand image already optimized",
+      reason: "Brand image is currently being optimized",
       status: statusRow.status,
     };
   }
@@ -495,7 +495,7 @@ exports.shouldSkipBrandOptimization = async (storeHash, brandId) => {
       reason:
         statusRow.status === "optimizing"
           ? "Brand image is currently being optimized"
-          : "Brand image is already optimized",
+          : "Brand image should not be re-queued",
     };
   }
 
@@ -895,7 +895,9 @@ exports.getBrandJobStatus = async (jobUuid, storeHash, options = {}) => {
       items_pagination: {
         page: itemPage,
         limit: itemLimit,
-        total: Number(job.total_images) || 0,
+        total: null,
+        requested_total: Number(job.total_images) || 0,
+        has_more: items.length === itemLimit,
         next_cursor:
           items.length === itemLimit ? String(items[items.length - 1]._id) : null,
       },

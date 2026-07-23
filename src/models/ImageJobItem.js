@@ -126,7 +126,6 @@ ImageJobItemSchema.index({
   status: 1,
 });
 ImageJobItemSchema.index({ status: 1, completed_at: 1 });
-ImageJobItemSchema.index({ job_uuid: 1, created_at: 1, _id: 1 });
 ImageJobItemSchema.index({ job_uuid: 1, _id: 1 });
 ImageJobItemSchema.index(
   { job_id: 1, status: 1, created_at: 1 },

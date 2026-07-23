@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 
 const ASSIGNED_BY_VALUES = ["client", "admin", "system"];
+const SUBSCRIPTION_STATUS_VALUES = ["active", "cancel"];
 
 const ClientPlanSchema = new mongoose.Schema(
   {
@@ -37,6 +38,26 @@ const ClientPlanSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    /** Active PayPal billing subscription id (I-...). */
+    paypal_subscription_id: {
+      type: String,
+      trim: true,
+      default: null,
+      index: true,
+    },
+    /** PayPal Billing Plan id (P-...) linked to this subscription. */
+    paypal_plan_id: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+    /** PayPal subscription lifecycle: active | cancel */
+    subscription_status: {
+      type: String,
+      enum: SUBSCRIPTION_STATUS_VALUES,
+      default: null,
+      index: true,
+    },
   },
   {
     timestamps: {
@@ -57,3 +78,4 @@ ClientPlanSchema.index({ plan_id: 1, store_hash: 1 });
 
 module.exports = mongoose.model("ClientPlan", ClientPlanSchema);
 module.exports.ASSIGNED_BY_VALUES = ASSIGNED_BY_VALUES;
+module.exports.SUBSCRIPTION_STATUS_VALUES = SUBSCRIPTION_STATUS_VALUES;

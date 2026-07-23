@@ -36,8 +36,8 @@ const SKIP_PENDING_CATEGORY_STATUSES = new Set([
   "pending",
 ]);
 
-/** Category IDs whose status should prevent re-queuing. */
-const SKIP_CATEGORY_STATUSES = new Set(["optimized", "optimizing"]);
+/** Category IDs whose status should prevent re-queuing (in-progress only). */
+const SKIP_CATEGORY_STATUSES = new Set(["optimizing"]);
 const RESTORE_SUCCESS_STATUSES = new Set(["restored"]);
 
 async function logCategoryOptimizationEvent({
@@ -433,17 +433,17 @@ async function shouldSkipCategoryOptimization(
   }
 
   const normalizedClientStatus = String(clientStatus || "").toLowerCase();
-  if (["optimized", "optimizing"].includes(normalizedClientStatus)) {
+  if (normalizedClientStatus === "optimizing") {
     return {
       skip: true,
-      reason: "Category image is already optimized or currently optimizing",
+      reason: "Category image is currently being optimized",
     };
   }
 
   const statusRow = await CategoryImageStatus.findOne({
     store_hash: storeHash,
     category_id: categoryId,
-    status: { $in: ["optimized", "optimizing"] },
+    status: "optimizing",
   })
     .select({ status: 1 })
     .lean();
@@ -451,7 +451,7 @@ async function shouldSkipCategoryOptimization(
   if (statusRow) {
     return {
       skip: true,
-      reason: "Category image already optimized",
+      reason: "Category image is currently being optimized",
       status: statusRow.status,
     };
   }
@@ -778,7 +778,7 @@ exports.fetchAllCategoryImagesInChunks = async ({
         const statusRows = await CategoryImageStatus.find({
           store_hash: storeHash,
           category_id: { $in: categoryIds },
-          status: { $in: ["optimized", "optimizing"] },
+          status: { $in: Array.from(SKIP_CATEGORY_STATUSES) },
         })
           .select({ category_id: 1 })
           .lean();
@@ -877,7 +877,7 @@ exports.shouldSkipCategoryOptimization = async (storeHash, categoryId) => {
       reason:
         statusRow.status === "optimizing"
           ? "Category image is currently being optimized"
-          : "Category image is already optimized",
+          : "Category image should not be re-queued",
     };
   }
 
@@ -1345,7 +1345,9 @@ exports.getCategoryJobStatus = async (jobUuid, storeHash, options = {}) => {
       items_pagination: {
         page: itemPage,
         limit: itemLimit,
-        total: Number(job.total_images) || 0,
+        total: null,
+        requested_total: Number(job.total_images) || 0,
+        has_more: items.length === itemLimit,
         next_cursor:
           items.length === itemLimit ? String(items[items.length - 1]._id) : null,
       },
@@ -1610,7 +1612,7 @@ exports.processWebhookCategoryBurst = async (storeHash) => {
         tree_id: entry.tree_id,
         image_url: entry.image_url,
         status: "skipped",
-        skip_reason: "Category image is already optimized or currently optimizing",
+        skip_reason: "Category image is currently being optimized",
       });
       continue;
     }
