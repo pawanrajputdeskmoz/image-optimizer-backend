@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 
 const ASSIGNED_BY_VALUES = ["client", "admin", "system"];
-const SUBSCRIPTION_STATUS_VALUES = ["active", "cancel"];
+const SUBSCRIPTION_STATUS_VALUES = ["pending", "active", "cancel"];
 
 const ClientPlanSchema = new mongoose.Schema(
   {
@@ -51,7 +51,7 @@ const ClientPlanSchema = new mongoose.Schema(
       trim: true,
       default: null,
     },
-    /** PayPal subscription lifecycle: active | cancel */
+    /** PayPal subscription lifecycle: pending | active | cancel */
     subscription_status: {
       type: String,
       enum: SUBSCRIPTION_STATUS_VALUES,

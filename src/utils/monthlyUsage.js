@@ -295,13 +295,29 @@ async function getCurrentMonthQuotaStatus(storeHash) {
   let record = await getMonthlyUsageRecord(storeHash);
   if (!record) {
     record = await ensureCurrentMonthUsage(storeHash);
-  } else if (record.monthly_image_limit === undefined) {
-    const snapshot = await resolveStorePlanSnapshot(storeHash);
-    record = await syncCurrentMonthUsage(
-      storeHash,
-      snapshot.plan_slug,
-      snapshot.monthly_image_limit
-    );
+  } else {
+    // Heal stale limit after paid upgrade (ClientPlan already Pro, usage row still old plan).
+    const clientPlan = await ClientPlan.findOne({ store_hash: storeHash })
+      .select({ base_plan_slug: 1, plan_id: 1, user_id: 1 })
+      .lean();
+    const expectedSlug = normalizeSlug(clientPlan?.base_plan_slug);
+    const usageSlug = normalizeSlug(record.plan_slug);
+    if (expectedSlug && expectedSlug !== usageSlug) {
+      record = await syncCurrentMonthUsage(
+        storeHash,
+        expectedSlug,
+        undefined,
+        clientPlan?.user_id || null,
+        clientPlan?.plan_id || null
+      );
+    } else if (record.monthly_image_limit === undefined) {
+      const snapshot = await resolveStorePlanSnapshot(storeHash);
+      record = await syncCurrentMonthUsage(
+        storeHash,
+        snapshot.plan_slug,
+        snapshot.monthly_image_limit
+      );
+    }
   }
 
   const used = Number(record?.images_optimized) || 0;
