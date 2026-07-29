@@ -6,6 +6,7 @@ const {
   bulkImageOptimizationCheckbox,
   getOptimizationJob,
   getPreviewImgData,
+  getSignedPreviewFile,
   updateAltText,
   restoreImage,
   bulkRestoreCheckbox,
@@ -77,6 +78,11 @@ async function imageOptimizationRoutes(app) {
       schema: getPreviewImgDataSchema,
     },
     getPreviewImgData
+  );
+
+  app.get(
+    "/preview-file",
+    getSignedPreviewFile
   );
 
   app.patch(

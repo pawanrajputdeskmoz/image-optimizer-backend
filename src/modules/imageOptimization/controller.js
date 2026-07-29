@@ -5,6 +5,7 @@ const {
   ImageOldData,
 } = require("../../models");
 const crypto = require("node:crypto");
+const fs = require("node:fs");
 const path = require("node:path");
 const { get } = require("../../utils/axiosUtils");
 const { fetchCatalogProducts } = require("../../utils/bcCatalogRateLimit");
@@ -84,6 +85,57 @@ async function batchAsync(items, batchSize, asyncFn) {
     results.push(...batchResults);
   }
   return results;
+}
+
+function resolveStorageRoot() {
+  const cwdStorageRoot = path.resolve(process.cwd(), "storage");
+  if (fs.existsSync(cwdStorageRoot)) {
+    return cwdStorageRoot;
+  }
+  return path.resolve(__dirname, "../../../storage");
+}
+
+function getPreviewSigningSecret() {
+  return process.env.PREVIEW_URL_SECRET || process.env.JWT_SECRET || "";
+}
+
+function toPreviewStorageKey(filePath) {
+  if (!filePath || typeof filePath !== "string") return null;
+  const normalized = filePath.trim().replace(/\\/g, "/");
+  const match = normalized.match(/(?:^|\/)storage\/(.+)$/i);
+  return match?.[1] || null;
+}
+
+function getPreviewBaseUrl(req) {
+  const configured =
+    process.env.PREVIEW_PUBLIC_BASE_URL ||
+    process.env.PUBLIC_API_BASE_URL ||
+    process.env.REDIRECT_URI ||
+    "";
+  if (configured) {
+    return configured.replace(/\/$/, "");
+  }
+
+  const proto =
+    String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() ||
+    req.protocol ||
+    "http";
+  const host =
+    String(req.headers["x-forwarded-host"] || "").split(",")[0].trim() ||
+    req.headers.host ||
+    "";
+  return host ? `${proto}://${host}` : "";
+}
+
+function buildSignedPreviewUrl(req, filePath) {
+  const key = toPreviewStorageKey(filePath);
+  const secret = getPreviewSigningSecret();
+  const base = getPreviewBaseUrl(req);
+  if (!key || !secret || !base) return null;
+
+  const exp = Math.floor(Date.now() / 1000) + 5 * 60;
+  const sig = crypto.createHmac("sha256", secret).update(`${key}:${exp}`).digest("hex");
+  return `${base}/api/image-optimizer/preview-file?key=${encodeURIComponent(key)}&exp=${exp}&sig=${sig}`;
 }
 
 
@@ -541,6 +593,8 @@ exports.getPreviewImgData = async (req, reply) => {
     const oldAltText = imageOldData?.altText || "";
     const newName = imageOldData?.newImageName || oldName;
     const newAltText = imageOldData?.newAltText || oldAltText;
+    const originalUrl = buildSignedPreviewUrl(req, originalPath);
+    const optimizedUrl = buildSignedPreviewUrl(req, optimizedPath);
 
     return reply.status(200).send({
       success: true,
@@ -555,6 +609,7 @@ exports.getPreviewImgData = async (req, reply) => {
           height: oldImageMeta.height ?? null,
           format: oldImageMeta.format ?? null,
           file_path: originalPath,
+          url: originalUrl,
         },
         new: {
           name: newName,
@@ -564,6 +619,7 @@ exports.getPreviewImgData = async (req, reply) => {
           height: newImageMeta.height ?? null,
           format: newImageMeta.format ?? null,
           file_path: optimizedPath,
+          url: optimizedUrl,
         },
         comparison: {
           name: { old: oldName, new: newName },
@@ -580,6 +636,10 @@ exports.getPreviewImgData = async (req, reply) => {
         files: {
           original: originalPath,
           optimized: optimizedPath,
+        },
+        urls: {
+          original: originalUrl,
+          optimized: optimizedUrl,
         },
         // backward-compatible alias
         oldData: imageOldData
@@ -600,6 +660,58 @@ exports.getPreviewImgData = async (req, reply) => {
     return reply.status(500).send({
       success: false,
       message: error.message || "Failed to fetch preview image data",
+    });
+  }
+};
+
+exports.getSignedPreviewFile = async (req, reply) => {
+  try {
+    const key = typeof req.query?.key === "string" ? req.query.key.trim() : "";
+    const sig = typeof req.query?.sig === "string" ? req.query.sig.trim() : "";
+    const exp = Number(req.query?.exp);
+    const secret = getPreviewSigningSecret();
+
+    if (!key || !sig || !Number.isFinite(exp) || !secret) {
+      return reply.status(400).send({ success: false, message: "Invalid preview URL" });
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    if (exp < now) {
+      return reply.status(403).send({ success: false, message: "Preview URL expired" });
+    }
+
+    const expectedSig = crypto
+      .createHmac("sha256", secret)
+      .update(`${key}:${exp}`)
+      .digest("hex");
+    const sigBuf = Buffer.from(sig, "hex");
+    const expectedBuf = Buffer.from(expectedSig, "hex");
+    if (
+      sigBuf.length !== expectedBuf.length ||
+      !crypto.timingSafeEqual(sigBuf, expectedBuf)
+    ) {
+      return reply.status(403).send({ success: false, message: "Invalid preview signature" });
+    }
+
+    const storageRoot = resolveStorageRoot();
+    const decodedKey = decodeURIComponent(key).replace(/\\/g, "/");
+    const filePath = path.resolve(storageRoot, decodedKey);
+    if (
+      filePath !== storageRoot &&
+      !filePath.startsWith(`${storageRoot}${path.sep}`)
+    ) {
+      return reply.status(403).send({ success: false, message: "Invalid preview path" });
+    }
+    if (!fs.existsSync(filePath)) {
+      return reply.status(404).send({ success: false, message: "Preview file not found" });
+    }
+
+    return reply.send(fs.createReadStream(filePath));
+  } catch (error) {
+    console.error("Signed Preview File Error:", error);
+    return reply.status(500).send({
+      success: false,
+      message: error.message || "Failed to load preview file",
     });
   }
 };
