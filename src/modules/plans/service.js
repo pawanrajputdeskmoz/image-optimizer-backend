@@ -8,6 +8,7 @@ const ImageJob = require("../../models/ImageJob");
 const ImageJobItem = require("../../models/ImageJobItem");
 const ImageOptimization = require("../../models/ImageOptimization");
 const ImageOptimizationLog = require("../../models/ImageOptimizationLog");
+const StoreImageStat = require("../../models/StoreImageStat");
 const User = require("../../models/User");
 const { notifyPlanLimitReached } = require("../../utils/planLimitNotify");
 const {
@@ -848,6 +849,13 @@ exports.clearPausedPlanLimitJobs = async (storeHash) => {
       },
     }
   );
+
+  await StoreImageStat.updateOne(
+    { store_hash: storeHash },
+    { $set: { pending_images: 0 } }
+  ).catch((err) => {
+    console.error("[clearPausedPlanLimitJobs] pending_images reset:", err?.message);
+  });
 
   return { error: null, cleared: result.modifiedCount || 0 };
 };
