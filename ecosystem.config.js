@@ -1,16 +1,7 @@
+/** PM2 workers only — API/backend runs separately. Product + category workers. */
 module.exports = {
   apps: [
-    {
-      name: "image-optimizer-api",
-      cwd: __dirname,
-      script: "src/server.js",
-      instances: 1,
-      exec_mode: "fork",
-      env: {
-        NODE_ENV: "production",
-      },
-    },
-
+    // --- Product optimization ---
     {
       name: "optimization-heavy-supervisor",
       cwd: __dirname,
@@ -36,6 +27,7 @@ module.exports = {
       exec_mode: "fork",
     },
 
+    // --- Product restore ---
     {
       name: "restore-heavy-supervisor",
       cwd: __dirname,
@@ -61,6 +53,7 @@ module.exports = {
       exec_mode: "fork",
     },
 
+    // --- Category workers ---
     {
       name: "category-image",
       cwd: __dirname,
@@ -78,6 +71,7 @@ module.exports = {
       exec_mode: "fork",
     },
 
+    // --- Bulk catalog fetch (product optimize-all) ---
     {
       name: "catalog-fetch",
       cwd: __dirname,
@@ -86,23 +80,5 @@ module.exports = {
       instances: 1,
       exec_mode: "fork",
     },
-
-    // Brand workers — uncomment when brand optimization/restore is needed
-    // {
-    //   name: "brand-image",
-    //   cwd: __dirname,
-    //   script: "npm",
-    //   args: "run worker:brand-image",
-    //   instances: 1,
-    //   exec_mode: "fork",
-    // },
-    // {
-    //   name: "brand-image-restore",
-    //   cwd: __dirname,
-    //   script: "npm",
-    //   args: "run worker:brand-image-restore",
-    //   instances: 1,
-    //   exec_mode: "fork",
-    // },
   ],
 };
