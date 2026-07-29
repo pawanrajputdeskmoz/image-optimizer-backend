@@ -163,9 +163,22 @@ function registerCors(app) {
 }
 
 function registerStorageFiles(app) {
-  const storageRoot = path.resolve(process.cwd(), "storage");
+  const resolveStorageRoot = () => {
+    const cwdStorageRoot = path.resolve(process.cwd(), "storage");
+    if (fs.existsSync(cwdStorageRoot)) {
+      return cwdStorageRoot;
+    }
+
+    const moduleStorageRoot = path.resolve(__dirname, "../storage");
+    if (fs.existsSync(moduleStorageRoot)) {
+      return moduleStorageRoot;
+    }
+
+    return cwdStorageRoot;
+  };
 
   app.get("/storage/*", async (request, reply) => {
+    const storageRoot = resolveStorageRoot();
     const wildcard = request.params["*"];
     if (!wildcard) {
       return reply.status(404).send({ success: false, message: "Not found" });

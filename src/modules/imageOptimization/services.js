@@ -2295,16 +2295,49 @@ exports.recordOptimizationJobImageResult = async ({
 
     await Promise.all(logWrites);
 
-    // Consume one dashboard pending slot when a queued optimize item finishes
-    // (success or fail). Worker "already optimized" skips and metadata-only
-    // updates were never registered as pending.
-    if (!skipped && !metadataOnly && job.store_hash) {
-      await StoreImageStat.updateOne(
-        { store_hash: job.store_hash },
-        { $inc: { pending_images: -1 } }
-      ).catch((err) => {
-        console.error("[recordOptimizationJobImageResult] pending stat:", err.message);
-      });
+    // Consume one dashboard pending slot when a queued item finishes
+    // (success or fail). Full compress always decrements.
+    // Metadata-only (optimize_image_enabled=false) also registered pending at
+    // queue time — only decrement when ImageStatus is still pending so
+    // already-optimized metadata updates are not counted twice.
+    if (!skipped && job.store_hash) {
+      if (!metadataOnly) {
+        await StoreImageStat.updateOne(
+          { store_hash: job.store_hash },
+          { $inc: { pending_images: -1 } }
+        ).catch((err) => {
+          console.error("[recordOptimizationJobImageResult] pending stat:", err.message);
+        });
+      } else if (productId != null && imageId != null) {
+        const pid = Number(productId);
+        const iid = Number(imageId);
+        if (Number.isFinite(pid) && Number.isFinite(iid)) {
+          const cleared = await ImageStatus.findOneAndDelete({
+            store_hash: job.store_hash,
+            product_id: pid,
+            image_id: iid,
+            status: "pending",
+          }).catch((err) => {
+            console.error(
+              "[recordOptimizationJobImageResult] pending status clear:",
+              err.message
+            );
+            return null;
+          });
+
+          if (cleared) {
+            await StoreImageStat.updateOne(
+              { store_hash: job.store_hash },
+              { $inc: { pending_images: -1 } }
+            ).catch((err) => {
+              console.error(
+                "[recordOptimizationJobImageResult] pending stat:",
+                err.message
+              );
+            });
+          }
+        }
+      }
     }
 
     return { error: null, job };

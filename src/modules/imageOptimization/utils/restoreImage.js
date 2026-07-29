@@ -596,20 +596,7 @@ async function restoreSingleImage({
     }),
   ];
 
-  if (origSize > 0 || optSize > 0 || savedBytes > 0) {
-    cleanupTasks.push(
-      StoreImageStat.updateOne(
-        { store_hash: storeHash },
-        {
-          $inc: {
-            total_original_size: -origSize,
-            total_optimized_size: -optSize,
-            total_saved_bytes: -savedBytes,
-          },
-        }
-      )
-    );
-  }
+  // Stats (total_saved_bytes etc.) are cumulative and must not be reversed on restore.
 
   await Promise.all(cleanupTasks);
 

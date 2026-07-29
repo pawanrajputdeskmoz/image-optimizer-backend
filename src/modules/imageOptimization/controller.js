@@ -297,11 +297,13 @@ exports.fetchAllProducts = async (req, reply) => {
 
     for (let i = 0; i < oldDataRows.length; i++) {
       const row = oldDataRows[i];
+      // Prefer optimized size when present (current BC file after optimize).
+      // Fall back to original only if optimized is missing (e.g. incomplete row).
       const source =
-        row.original?.size > 0
-          ? row.original
-          : row.optimized?.size > 0
-            ? row.optimized
+        row.optimized?.size > 0
+          ? row.optimized
+          : row.original?.size > 0
+            ? row.original
             : null;
 
       if (!source) continue;
@@ -1396,6 +1398,33 @@ exports.updateAltText = async (req, reply) => {
       });
     }
 
+    const existingOldData = await ImageOldData.findOne({
+      store_hash: storeHash,
+      product_id: Number(productId),
+      image_id: Number(imageId),
+    })
+      .select({ altText: 1, newAltText: 1 })
+      .lean();
+
+    // Use the most recent "current" alt as old: newAltText if set (template/prev manual),
+    // otherwise fall back to the original altText backup.
+    let preservedOldAltText = existingOldData?.newAltText || existingOldData?.altText;
+    if (preservedOldAltText == null && Number(productId) > 0) {
+      const currentImage = await get(
+        `https://api.bigcommerce.com/stores/${storeHash}/v3/catalog/products/${productId}/images/${imageId}`,
+        {
+          "X-Auth-Token": accessToken,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        }
+      ).catch(() => null);
+
+      preservedOldAltText =
+        currentImage?.data?.description ??
+        currentImage?.data?.alt_text ??
+        null;
+    }
+
     const result = await updateBigCommerceProductImageMetadata({
       storeHash,
       productId,
@@ -1428,8 +1457,8 @@ exports.updateAltText = async (req, reply) => {
       },
       {
         $set: {
-          altText,
-          newAltText: altText,
+          ...(preservedOldAltText != null ? { altText: preservedOldAltText } : {}),
+          ...(altText !== undefined ? { newAltText: altText } : {}),
         },
         $setOnInsert: {
           store_hash: storeHash,
