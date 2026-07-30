@@ -123,6 +123,7 @@ exports.getStoreOptimizationSettings = async (req, reply) => {
 
 const ALLOWED_KEYS = new Set([
   "channel_id",
+  "optimization_mode",
   "optimize_image_enabled",
   "is_filename_template_enabled",
   "filename_template",
@@ -130,6 +131,7 @@ const ALLOWED_KEYS = new Set([
   "alt_text_template",
   "image_quality",
   "output_format",
+  "product_sort_direction",
 ]);
 
 exports.upsertStoreOptimizationSettings = async (req, reply) => {
@@ -145,7 +147,31 @@ exports.upsertStoreOptimizationSettings = async (req, reply) => {
   for (const key of ALLOWED_KEYS) {
     if (!Object.prototype.hasOwnProperty.call(body, key)) continue;
     if (key === "channel_id") continue;
+    if (key === "product_sort_direction") {
+      $set[key] = body[key] === "desc" ? "desc" : "asc";
+      continue;
+    }
     $set[key] = body[key];
+  }
+
+  // Enforce mode → feature flags before DB save.
+  // optimize_and_alt: no forced overrides
+  // optimize_only: alt text off
+  // alt_only: image optimize + filename off; alt text must stay on
+  const mode = String($set.optimization_mode || body.optimization_mode || "").trim();
+  if (mode === "optimize_only") {
+    $set.is_alt_text_template_enabled = false;
+  } else if (mode === "alt_only") {
+    if ($set.is_alt_text_template_enabled === false) {
+      return reply.status(400).send({
+        success: false,
+        message:
+          "Alt Text Template cannot be disabled when Optimization Mode is Generate Alt Text Only.",
+      });
+    }
+    $set.optimize_image_enabled = false;
+    $set.is_filename_template_enabled = false;
+    $set.is_alt_text_template_enabled = true;
   }
 
   const doc = await StoreOptimizationSettings.findOneAndUpdate(

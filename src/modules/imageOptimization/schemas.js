@@ -15,6 +15,7 @@ const fetchAllProductsSchema = {
       page: { type: ["integer", "string"] },
       limit: { type: ["integer", "string"] },
       search: { type: "string" },
+      sort: { type: "string" },
     },
   },
 };

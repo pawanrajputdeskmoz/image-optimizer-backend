@@ -106,16 +106,27 @@ function toPreviewStorageKey(filePath) {
   return match?.[1] || null;
 }
 
+/** Strip path/query so OAuth REDIRECT_URI never breaks preview URLs. */
+function normalizePublicBaseUrl(raw) {
+  if (!raw || typeof raw !== "string") return "";
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  try {
+    return new URL(trimmed).origin;
+  } catch {
+    return trimmed.replace(/\/$/, "");
+  }
+}
+
 function getPreviewBaseUrl(req) {
+  // Explicit override for production (recommended on Linux behind nginx).
   const configured =
-    process.env.PREVIEW_PUBLIC_BASE_URL ||
-    process.env.PUBLIC_API_BASE_URL ||
-    process.env.REDIRECT_URI ||
-    "";
+    process.env.PREVIEW_PUBLIC_BASE_URL || process.env.PUBLIC_API_BASE_URL || "";
   if (configured) {
-    return configured.replace(/\/$/, "");
+    return normalizePublicBaseUrl(configured);
   }
 
+  // Prefer the host the browser actually used for this API call.
   const proto =
     String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() ||
     req.protocol ||
@@ -124,7 +135,24 @@ function getPreviewBaseUrl(req) {
     String(req.headers["x-forwarded-host"] || "").split(",")[0].trim() ||
     req.headers.host ||
     "";
-  return host ? `${proto}://${host}` : "";
+  if (host) {
+    return `${proto}://${host}`;
+  }
+
+  // Last resort: OAuth callback origin only (never keep a path).
+  return normalizePublicBaseUrl(process.env.REDIRECT_URI || "");
+}
+
+function buildPublicStorageUrl(req, filePath) {
+  const key = toPreviewStorageKey(filePath);
+  const base = getPreviewBaseUrl(req);
+  if (!key || !base) return null;
+  const encodedKey = key
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  return `${base}/storage/${encodedKey}`;
 }
 
 function buildSignedPreviewUrl(req, filePath) {
@@ -136,6 +164,44 @@ function buildSignedPreviewUrl(req, filePath) {
   const exp = Math.floor(Date.now() / 1000) + 5 * 60;
   const sig = crypto.createHmac("sha256", secret).update(`${key}:${exp}`).digest("hex");
   return `${base}/api/image-optimizer/preview-file?key=${encodeURIComponent(key)}&exp=${exp}&sig=${sig}`;
+}
+
+function resolvePreviewUrl(req, filePath, cdnFallback) {
+  return (
+    buildSignedPreviewUrl(req, filePath) ||
+    buildPublicStorageUrl(req, filePath) ||
+    (typeof cdnFallback === "string" && cdnFallback.trim()
+      ? cdnFallback.trim()
+      : null)
+  );
+}
+
+function previewMimeType(filePath) {
+  const ext = path.extname(filePath || "").toLowerCase();
+  const map = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".avif": "image/avif",
+    ".bmp": "image/bmp",
+    ".svg": "image/svg+xml",
+  };
+  return map[ext] || "application/octet-stream";
+}
+
+function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function isPathInsideRoot(filePath, rootPath) {
+  const relative = path.relative(rootPath, filePath);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 
@@ -178,6 +244,18 @@ exports.fetchAllProducts = async (req, reply) => {
         ? body.search.trim()
         : "";
 
+    const rawSort =
+      typeof body.sort === "string" ? body.sort.trim().toLowerCase() : "";
+    // BigCommerce expects separate `sort` + `direction` params (not "id:asc").
+    // Default product name sort direction is asc when client omits sort.
+    let sortField = "name";
+    let sortDirection = "asc";
+    if (rawSort === "desc" || rawSort === "name:desc") {
+      sortDirection = "desc";
+    } else if (rawSort === "asc" || rawSort === "name:asc" || !rawSort) {
+      sortDirection = "asc";
+    }
+
     const accessToken = req.accessToken || req.currentUser?.access_token || null;
     const storeUrl = req.currentUser?.storeUrl || null;
 
@@ -205,6 +283,8 @@ exports.fetchAllProducts = async (req, reply) => {
       page: String(page),
       limit: String(limit),
       "channel_id:in": String(channelId),
+      sort: sortField,
+      direction: sortDirection,
     });
 
     if (searchKeyword) {
@@ -593,8 +673,16 @@ exports.getPreviewImgData = async (req, reply) => {
     const oldAltText = imageOldData?.altText || "";
     const newName = imageOldData?.newImageName || oldName;
     const newAltText = imageOldData?.newAltText || oldAltText;
-    const originalUrl = buildSignedPreviewUrl(req, originalPath);
-    const optimizedUrl = buildSignedPreviewUrl(req, optimizedPath);
+    const originalUrl = resolvePreviewUrl(
+      req,
+      originalPath,
+      imageOptimization?.bigcommerce_image_url,
+    );
+    const optimizedUrl = resolvePreviewUrl(
+      req,
+      optimizedPath,
+      imageOptimization?.bigcommerce_optimized_image_url,
+    );
 
     return reply.status(200).send({
       success: true,
@@ -680,9 +768,11 @@ exports.getSignedPreviewFile = async (req, reply) => {
       return reply.status(403).send({ success: false, message: "Preview URL expired" });
     }
 
+    // Fastify already URL-decodes query values; decode again only if still encoded.
+    const storageKey = safeDecodeURIComponent(key).replace(/\\/g, "/");
     const expectedSig = crypto
       .createHmac("sha256", secret)
-      .update(`${key}:${exp}`)
+      .update(`${storageKey}:${exp}`)
       .digest("hex");
     const sigBuf = Buffer.from(sig, "hex");
     const expectedBuf = Buffer.from(expectedSig, "hex");
@@ -694,19 +784,19 @@ exports.getSignedPreviewFile = async (req, reply) => {
     }
 
     const storageRoot = resolveStorageRoot();
-    const decodedKey = decodeURIComponent(key).replace(/\\/g, "/");
+    const decodedKey = storageKey.replace(/^(\.\.(\/|\\|$))+/, "");
     const filePath = path.resolve(storageRoot, decodedKey);
-    if (
-      filePath !== storageRoot &&
-      !filePath.startsWith(`${storageRoot}${path.sep}`)
-    ) {
+    if (!isPathInsideRoot(filePath, storageRoot)) {
       return reply.status(403).send({ success: false, message: "Invalid preview path" });
     }
-    if (!fs.existsSync(filePath)) {
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
       return reply.status(404).send({ success: false, message: "Preview file not found" });
     }
 
-    return reply.send(fs.createReadStream(filePath));
+    return reply
+      .type(previewMimeType(filePath))
+      .header("cache-control", "private, max-age=300")
+      .send(fs.createReadStream(filePath));
   } catch (error) {
     console.error("Signed Preview File Error:", error);
     return reply.status(500).send({
@@ -759,10 +849,16 @@ exports.singleImageOptimization = async (req, reply) => {
     const runFilename = Boolean(settings.is_filename_template_enabled);
     const runAltText = Boolean(settings.is_alt_text_template_enabled);
 
-    if (!hasAnyOptimizationFeatureEnabled(settings)) {
+    const bulkMetadataOnlySupported = Boolean(
+      settings.optimize_image_enabled ||
+        settings.is_alt_text_template_enabled
+    );
+
+    if (!bulkMetadataOnlySupported) {
       return reply.status(400).send({
         success: false,
-        message: "No image optimization features are enabled in store settings",
+        message:
+          "Bulk optimization requires image optimization or alt-text generation to be enabled in store settings",
         data: { settings },
       });
     }
@@ -1118,25 +1214,42 @@ exports.bulkImageOptimization = async (req, reply) => {
       return reply.status(500).send({ success: false, message: settingError });
     }
 
-    if (!hasAnyOptimizationFeatureEnabled(settings)) {
+    const queueSupportsRequestedWork = Boolean(
+      settings.optimize_image_enabled ||
+        settings.is_alt_text_template_enabled
+    );
+
+    if (!queueSupportsRequestedWork) {
       return reply.status(400).send({
         success: false,
-        message: "No image optimization features are enabled in store settings",
+        message:
+          "Bulk optimization requires image optimization or alt-text generation to be enabled in store settings",
         data: { settings },
       });
     }
 
     await clearPausedPlanLimitJobs(storeHash).catch(() => {});
 
-    const [planBlocked, bulkBlocked] = await Promise.all([
-      replyIfMonthlyPlanLimitExceeded(reply, storeHash, req.currentUser?.selectedPlan),
-      replyIfBulkOptimizationBlocked(reply, storeHash, "product"),
-    ]);
-
-    if (planBlocked) {
-      return;
+    const quota = await canOptimizeImages(
+      storeHash,
+      req.currentUser?.selectedPlan || "free",
+      1
+    );
+    if (!quota.allowed) {
+      await notifyPlanLimitReached(storeHash, {
+        message: quota.message,
+        planName: quota.plan_name || quota.plan?.name || null,
+        monthlyLimit: quota.monthly_limit ?? null,
+        monthlyUsed: quota.monthly_used ?? null,
+      }).catch(() => {});
+      return reply.status(403).send(buildPlanLimitApiBody(quota));
     }
 
+    const bulkBlocked = await replyIfBulkOptimizationBlocked(
+      reply,
+      storeHash,
+      "product"
+    );
     if (bulkBlocked) {
       return;
     }
@@ -1175,18 +1288,28 @@ exports.bulkImageOptimization = async (req, reply) => {
         currency: req.currentUser?.currency || null,
         store_name: req.currentUser?.store_name || null,
         selectedPlan: req.currentUser?.selectedPlan || "free",
+        maxQueueImages: quota.unlimited ? null : Math.max(0, Number(quota.remaining) || 0),
       },
       coordinatorWorkerJobOptions()
     );
 
+    const queueCap = quota.unlimited
+      ? null
+      : Math.max(0, Number(quota.remaining) || 0);
+    const queuedMessage = queueCap != null
+      ? `Bulk optimization started. This run will queue up to ${queueCap.toLocaleString("en-US")} image(s) based on your remaining monthly quota.`
+      : buildBulkQueuedMessage("product");
+
     return reply.status(202).send({
       success: true,
-      message: buildBulkQueuedMessage("product"),
+      message: queuedMessage,
       data: {
         job_uuid: jobUuid,
         job_type: "bulk",
         status: "fetching",
         entity_type: "product",
+        quota_limited: queueCap != null,
+        quota_remaining: queueCap,
       },
     });
   } catch (error) {
@@ -1636,16 +1759,24 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
 
     await clearPausedPlanLimitJobs(storeHash).catch(() => {});
 
-    const [planBlocked, bulkBlocked] = await Promise.all([
-      replyIfMonthlyPlanLimitExceeded(reply, storeHash, req.currentUser?.selectedPlan),
-      isFullBulkOptimizationJobType(jobType)
-        ? replyIfBulkOptimizationBlocked(reply, storeHash, "product")
-        : Promise.resolve(false),
-    ]);
-
-    if (planBlocked) {
-      return;
+    const quota = await canOptimizeImages(
+      storeHash,
+      req.currentUser?.selectedPlan || "free",
+      1
+    );
+    if (!quota.allowed) {
+      await notifyPlanLimitReached(storeHash, {
+        message: quota.message,
+        planName: quota.plan_name || quota.plan?.name || null,
+        monthlyLimit: quota.monthly_limit ?? null,
+        monthlyUsed: quota.monthly_used ?? null,
+      }).catch(() => {});
+      return reply.status(403).send(buildPlanLimitApiBody(quota));
     }
+
+    const bulkBlocked = isFullBulkOptimizationJobType(jobType)
+      ? await replyIfBulkOptimizationBlocked(reply, storeHash, "product")
+      : false;
 
     if (bulkBlocked) {
       return;
@@ -1676,10 +1807,16 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
       return reply.status(500).send({ success: false, message: settingError });
     }
 
-    if (!hasAnyOptimizationFeatureEnabled(settings)) {
+    const queueSupportsRequestedWork = Boolean(
+      settings.optimize_image_enabled ||
+        settings.is_alt_text_template_enabled
+    );
+
+    if (!queueSupportsRequestedWork) {
       return reply.status(400).send({
         success: false,
-        message: "No image optimization features are enabled in store settings",
+        message:
+          "Checkbox optimization requires image optimization or alt-text generation to be enabled in store settings",
         data: { settings },
       });
     }
@@ -1693,12 +1830,17 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
       req.body?.force_reoptimize === true ||
       req.body?.reoptimize === true;
 
-    // Filename/alt templates must still apply to already-optimized images
-    // (worker runs a metadata-only update), so only optimizing/pending block.
-    const metadataTemplatesOn = Boolean(
-      settings.is_filename_template_enabled ||
-        settings.is_alt_text_template_enabled
-    );
+    // Checkbox: only alt-text may re-queue already-optimized images
+    // (BC supports description PUT). Filename applies during real
+    // optimize/upload, so filename alone must not reopen optimized images.
+    // Full bulk now follows the same rule.
+    const metadataTemplatesOn =
+      jobType === "checkBox" || jobType === "bulk"
+        ? Boolean(settings.is_alt_text_template_enabled)
+        : Boolean(
+            settings.is_filename_template_enabled ||
+              settings.is_alt_text_template_enabled
+          );
     const blockingStatuses = metadataTemplatesOn
       ? ["optimizing", "pending"]
       : null;
@@ -1802,6 +1944,37 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
           item.optimization_status || item.status || null,
         placementSource: item,
       });
+    }
+
+    const quotaQueueLimit = quota.unlimited
+      ? null
+      : Math.max(0, Number(quota.remaining) || 0);
+    let quotaDeferredCount = 0;
+    if (quotaQueueLimit != null && toQueue.length > quotaQueueLimit) {
+      const overflow = toQueue.splice(quotaQueueLimit);
+      quotaDeferredCount = overflow.length;
+      const overflowKeySet = new Set(
+        overflow.map((entry) => `${Number(entry.productId)}:${Number(entry.imageId)}`)
+      );
+      const quotaSkipReason =
+        "Not queued because this run reached your remaining monthly image quota";
+
+      for (const jobItem of jobItems) {
+        if (jobItem.status !== "queued") continue;
+        const key = `${Number(jobItem.product_id)}:${Number(jobItem.image_id)}`;
+        if (!overflowKeySet.has(key)) continue;
+        jobItem.status = "skipped";
+        jobItem.skip_reason = quotaSkipReason;
+      }
+
+      skipped.push(
+        ...overflow.map((entry) => ({
+          index: entry.index,
+          reason: quotaSkipReason,
+          image_id: entry.imageId ?? null,
+          product_id: entry.productId ?? null,
+        }))
+      );
     }
 
     const optimizationBatchSize = getOptimizationBatchSize();
@@ -2018,13 +2191,19 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
 
     return reply.status(202).send({
       success: true,
-      message: buildBulkQueuedMessage("product"),
+      message:
+        quotaDeferredCount > 0
+          ? `Queued ${queuedCount} image(s). ${quotaDeferredCount.toLocaleString("en-US")} image(s) were not queued because this run reached your remaining monthly quota.`
+          : buildBulkQueuedMessage("product"),
       data: {
         job_uuid: jobUuid,
         entity_type: "product",
         queued: queuedCount,
         skipped: skipped.length,
         queue_mode: useBatchQueue ? "batch" : "per-image",
+        quota_limited: quotaDeferredCount > 0,
+        not_queued_due_to_quota: quotaDeferredCount,
+        quota_remaining: quotaQueueLimit,
       },
     });
   } catch (error) {

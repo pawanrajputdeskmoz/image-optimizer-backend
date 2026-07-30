@@ -39,6 +39,7 @@ async function startWorker() {
         currency,
         store_name,
         selectedPlan,
+        maxQueueImages = null,
       } = job.data;
 
       console.log("[catalog-fetch-worker] starting", { jobUuid, storeHash });
@@ -55,12 +56,14 @@ async function startWorker() {
         storeHash,
         accessToken,
         storeUrl,
-        // Filename/alt templates must still apply to already-optimized images
-        // (worker runs a metadata-only update for them).
+        maxQueueImages,
+        // Full bulk may re-queue already-optimized images only for alt-text
+        // metadata updates. Filename changes happen during real optimize/upload.
         includeOptimized: Boolean(
-          settings?.is_filename_template_enabled ||
-            settings?.is_alt_text_template_enabled
+          settings?.is_alt_text_template_enabled
         ),
+        productSortDirection:
+          settings?.product_sort_direction === "desc" ? "desc" : "asc",
       });
 
       if (catalogError) {
@@ -136,6 +139,7 @@ async function startWorker() {
       console.log("[catalog-fetch-worker] done", {
         jobUuid,
         queuedImages,
+        quotaDeferredImages: meta?.quota_deferred_images || 0,
         batches: batchCount,
         redisJobs: queued,
         duplicates,
@@ -151,6 +155,7 @@ async function startWorker() {
         batches: batchCount,
         dispatched,
         paused_plan_limit: Boolean(paused),
+        quota_deferred_images: meta?.quota_deferred_images || 0,
       };
     },
     {

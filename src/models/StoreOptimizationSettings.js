@@ -38,6 +38,13 @@ const StoreOptimizationSettingsSchema = new mongoose.Schema(
       default: true,
     },
 
+    optimization_mode: {
+      type: String,
+      enum: ["optimize_and_alt", "optimize_only", "alt_only"],
+      default: "optimize_only",
+      trim: true,
+    },
+
     //=======================================================
     // Image File Name Template
     //=======================================================
@@ -123,6 +130,16 @@ const StoreOptimizationSettingsSchema = new mongoose.Schema(
     auto_optimize_new_category_images: {
       type: Boolean,
       default: false,
+    },
+
+    /**
+     * Product listing / catalog-fetch name sort direction.
+     * Applied as BigCommerce sort=name&direction=asc|desc.
+     */
+    product_sort_direction: {
+      type: String,
+      enum: ["asc", "desc"],
+      default: "asc",
     },
 
   },

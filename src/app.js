@@ -200,7 +200,20 @@ function registerStorageFiles(app) {
       return reply.status(404).send({ success: false, message: "Not found" });
     }
 
-    return reply.send(fs.createReadStream(filePath));
+    const ext = path.extname(filePath).toLowerCase();
+    const mime =
+      {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+        ".avif": "image/avif",
+        ".bmp": "image/bmp",
+        ".svg": "image/svg+xml",
+      }[ext] || "application/octet-stream";
+
+    return reply.type(mime).send(fs.createReadStream(filePath));
   });
 }
 module.exports = { buildApp };

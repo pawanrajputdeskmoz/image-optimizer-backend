@@ -67,6 +67,10 @@ const upsertStoreOptimizationSettingsSchema = {
       channel_id: {
         type: ["integer", "string"],
       },
+      optimization_mode: {
+        type: "string",
+        enum: ["optimize_and_alt", "optimize_only", "alt_only"],
+      },
       optimize_image_enabled: { type: "boolean" },
       is_filename_template_enabled: { type: "boolean" },
       filename_template: {
@@ -88,6 +92,10 @@ const upsertStoreOptimizationSettingsSchema = {
       output_format: {
         type: "string",
         enum: ["jpeg", "png", "webp", "avif", "original"],
+      },
+      product_sort_direction: {
+        type: "string",
+        enum: ["asc", "desc"],
       },
       shop: { type: "string" },
       store_id: { type: "string" },

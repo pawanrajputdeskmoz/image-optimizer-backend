@@ -186,6 +186,7 @@ module.exports = {
     output_format: image.outputFormat,
     auto_optimize_new_images: false,
     auto_optimize_new_category_images: false,
+    product_sort_direction: "asc",
   },
 
   rateLimit: {

@@ -104,6 +104,7 @@ exports.fetchStoreOptimizationSettings = async (storeHash, channelId = 1) => {
         output_format: 1,
         auto_optimize_new_images: 1,
         auto_optimize_new_category_images: 1,
+        product_sort_direction: 1,
       })
       .lean();
 
@@ -140,6 +141,9 @@ exports.fetchStoreOptimizationSettings = async (storeHash, channelId = 1) => {
 
         auto_optimize_new_category_images:
           Boolean(doc.auto_optimize_new_category_images),
+
+        product_sort_direction:
+          doc.product_sort_direction === "desc" ? "desc" : "asc",
       };
 
     return {
@@ -799,6 +803,7 @@ exports.fetchAllCatalogImagesInChunks = async ({
   pageSize = config.catalog.pageSize,
   keyword = "",
   skipOptimized = true,
+  productSortDirection = "asc",
 }) => {
   if (!storeHash) {
     return { error: "storeHash is required", items: [], meta: null };
@@ -830,6 +835,8 @@ exports.fetchAllCatalogImagesInChunks = async ({
   let totalPages = 1;
   let totalProducts = 0;
   let skippedAlreadyOptimized = 0;
+  const sortDirection =
+    productSortDirection === "desc" ? "desc" : "asc";
 
   try {
     while (page <= totalPages) {
@@ -838,6 +845,8 @@ exports.fetchAllCatalogImagesInChunks = async ({
         include_fields: "id,images",
         page: String(page),
         limit: String(limit),
+        sort: "name",
+        direction: sortDirection,
       });
 
       const search = String(keyword || "").trim();
@@ -961,9 +970,12 @@ exports.streamCatalogFetchToJobItems = async ({
   storeUrl,
   pageSize = config.catalog.pageSize,
   skipOptimized = true,
+  maxQueueImages = null,
   /** When true (filename/alt templates on), already-optimized images are still
    *  queued so the worker can apply metadata; optimizing/pending stay skipped. */
   includeOptimized = false,
+  /** Product name sort for BC catalog pages (matches dashboard sort preference). */
+  productSortDirection = "asc",
   batchSize = getOptimizationBatchSize(),
 }) => {
   if (!jobUuid || !storeHash) {
@@ -996,9 +1008,16 @@ exports.streamCatalogFetchToJobItems = async ({
   let totalProducts = 0;
   let skippedAlreadyOptimized = 0;
   let queuedImages = 0;
+  let quotaDeferredImages = 0;
   let batchIndex = 0;
   let pendingBatch = [];
   const discoveredForStats = [];
+  const queueCap =
+    maxQueueImages == null || !Number.isFinite(Number(maxQueueImages))
+      ? null
+      : Math.max(0, Number(maxQueueImages) || 0);
+  const sortDirection =
+    productSortDirection === "desc" ? "desc" : "asc";
 
   const flushBatch = async () => {
     if (pendingBatch.length === 0) return;
@@ -1021,6 +1040,8 @@ exports.streamCatalogFetchToJobItems = async ({
         include_fields: "id,images",
         page: String(page),
         limit: String(limit),
+        sort: "name",
+        direction: sortDirection,
       });
 
       const response = await fetchCatalogProducts(
@@ -1094,6 +1115,11 @@ exports.streamCatalogFetchToJobItems = async ({
       }
 
       for (const row of toQueue) {
+        if (queueCap != null && queuedImages >= queueCap) {
+          quotaDeferredImages += 1;
+          continue;
+        }
+
         const currentBatchIndex = batchIndex;
         pendingBatch.push({
           job_uuid: jobUuid,
@@ -1117,7 +1143,8 @@ exports.streamCatalogFetchToJobItems = async ({
         }
       }
 
-      const imagesFoundSoFar = queuedImages + skippedAlreadyOptimized;
+      const imagesFoundSoFar =
+        queuedImages + skippedAlreadyOptimized + quotaDeferredImages;
       await ImageJob.updateOne(
         { job_uuid: jobUuid },
         {
@@ -1136,14 +1163,33 @@ exports.streamCatalogFetchToJobItems = async ({
 
     await registerPendingProductImages(storeHash, discoveredForStats, userId);
 
+    if (queueCap != null) {
+      const pendingDisplayCount = queuedImages + quotaDeferredImages;
+      await StoreImageStat.findOneAndUpdate(
+        { store_hash: storeHash },
+        {
+          $set: {
+            pending_images: pendingDisplayCount,
+            ...(userId ? { user_id: userId } : {}),
+          },
+          $setOnInsert: { store_hash: storeHash },
+        },
+        { upsert: true }
+      ).catch((err) => {
+        console.error("[streamCatalogFetchToJobItems] pending stat:", err.message);
+      });
+    }
+
     return {
       error: null,
       meta: {
         pages_fetched: totalPages,
         products_fetched: totalProducts,
-        images_found: queuedImages + skippedAlreadyOptimized,
+        images_found: queuedImages + skippedAlreadyOptimized + quotaDeferredImages,
         images_queued: queuedImages,
         skipped_already_optimized: skippedAlreadyOptimized,
+        quota_deferred_images: quotaDeferredImages,
+        quota_capped: quotaDeferredImages > 0,
         page_size: limit,
       },
       batchCount: batchIndex,

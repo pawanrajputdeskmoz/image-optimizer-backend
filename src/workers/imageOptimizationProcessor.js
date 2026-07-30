@@ -117,12 +117,16 @@ async function processSingleImageOptimization({
     }
   }
 
-  // Filename/alt templates must still apply to already-optimized images
-  // (compressImage runs a metadata-only update), so "optimized" doesn't block.
-  const metadataTemplatesOn = Boolean(
-    settings?.is_filename_template_enabled ||
-      settings?.is_alt_text_template_enabled
-  );
+  // Filename applies during real optimize/upload. For checkbox and full bulk
+  // jobs, only alt-text may still run a metadata-only pass on already-
+  // optimized images.
+  const metadataTemplatesOn =
+    jobType === "checkBox" || jobType === "bulk"
+      ? Boolean(settings?.is_alt_text_template_enabled)
+      : Boolean(
+          settings?.is_filename_template_enabled ||
+            settings?.is_alt_text_template_enabled
+        );
 
   if (!forceReoptimize) {
     const clientStatus = String(optimization_status || "").toLowerCase();
