@@ -2,6 +2,7 @@ const crypto = require("node:crypto");
 const { CategoryImage, CategoryImageStatus } = require("../../models");
 const config = require("../../config");
 const { parseChannelId, resolveChannelSiteUrl } = require("../../utils/channelContext");
+const { resolvePreviewUrl } = require("../../utils/previewUrls");
 const {
   buildBigCommerceError,
   normalizePagination,
@@ -198,6 +199,17 @@ exports.getCategoryPreviewImgData = async (req, reply) => {
     const originalPath = categoryImage?.original_image_path || null;
     const optimizedPath = categoryImage?.optimized_image_path || null;
 
+    const originalUrl = resolvePreviewUrl(
+      req,
+      originalPath,
+      categoryImage?.original_url,
+    );
+    const optimizedUrl = resolvePreviewUrl(
+      req,
+      optimizedPath,
+      categoryImage?.optimized_url,
+    );
+
     return reply.status(200).send({
       success: true,
       data: {
@@ -219,13 +231,17 @@ exports.getCategoryPreviewImgData = async (req, reply) => {
               optimized: categoryImage.optimized || { size: null, width: null, height: null, format: null },
               saved_bytes: categoryImage.saved_bytes ?? null,
               saved_percentage: categoryImage.saved_percentage ?? null,
-              original_url: categoryImage.original_url || null,
-              optimized_url: categoryImage.optimized_url || null,
+              original_url: originalUrl,
+              optimized_url: optimizedUrl,
             }
           : null,
         files: {
           original: originalPath,
           optimized: optimizedPath,
+        },
+        urls: {
+          original: originalUrl,
+          optimized: optimizedUrl,
         },
       },
     });

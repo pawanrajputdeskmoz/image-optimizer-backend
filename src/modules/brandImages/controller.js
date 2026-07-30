@@ -1,6 +1,7 @@
 const crypto = require("node:crypto");
 const { BrandImage, BrandImageStatus } = require("../../models");
 const config = require("../../config");
+const { resolvePreviewUrl } = require("../../utils/previewUrls");
 const {
   fetchBrandImages,
   fetchAllBrandImagesInChunks,
@@ -160,6 +161,17 @@ exports.getBrandPreviewImgData = async (req, reply) => {
     const originalPath = brandImage?.original_image_path || null;
     const optimizedPath = brandImage?.optimized_image_path || null;
 
+    const originalUrl = resolvePreviewUrl(
+      req,
+      originalPath,
+      brandImage?.original_url,
+    );
+    const optimizedUrl = resolvePreviewUrl(
+      req,
+      optimizedPath,
+      brandImage?.optimized_url,
+    );
+
     return reply.status(200).send({
       success: true,
       data: {
@@ -179,13 +191,17 @@ exports.getBrandPreviewImgData = async (req, reply) => {
               optimized: brandImage.optimized || { size: null, width: null, height: null, format: null },
               saved_bytes: brandImage.saved_bytes ?? null,
               saved_percentage: brandImage.saved_percentage ?? null,
-              original_url: brandImage.original_url || null,
-              optimized_url: brandImage.optimized_url || null,
+              original_url: originalUrl,
+              optimized_url: optimizedUrl,
             }
           : null,
         files: {
           original: originalPath,
           optimized: optimizedPath,
+        },
+        urls: {
+          original: originalUrl,
+          optimized: optimizedUrl,
         },
       },
     });
