@@ -198,6 +198,19 @@ exports.uninstallApp = async (req, reply) => {
       return reply.status(400).send("Invalid store hash in JWT");
     }
 
+    // Best-effort: stop PayPal billing and move store to free when the app is removed.
+    try {
+      const { cancelStoreSubscription } = require("../payment/service");
+      const cancelResult = await cancelStoreSubscription(storeHash, "App uninstalled", {
+        downgradeToFree: true,
+      });
+      if (cancelResult.error) {
+        console.error("[uninstall] paypal cancel:", cancelResult.error);
+      }
+    } catch (cancelErr) {
+      console.error("[uninstall] paypal cancel:", cancelErr.message);
+    }
+
     await User.findOneAndUpdate(
       { store_hash: storeHash },
       {

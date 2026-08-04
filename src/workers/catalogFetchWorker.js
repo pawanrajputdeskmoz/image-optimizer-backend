@@ -38,11 +38,15 @@ async function startWorker() {
         settings,
         currency,
         store_name,
-        selectedPlan,
+        selectedPlan = null,
         maxQueueImages = null,
       } = job.data;
 
       console.log("[catalog-fetch-worker] starting", { jobUuid, storeHash });
+
+      const { getStorePlanSlug } = require("../modules/plans/service");
+      const resolvedPlanSlug =
+        selectedPlan || (await getStorePlanSlug(storeHash, "free"));
 
       const {
         error: catalogError,
@@ -57,11 +61,7 @@ async function startWorker() {
         accessToken,
         storeUrl,
         maxQueueImages,
-        // Full bulk may re-queue already-optimized images only for alt-text
-        // metadata updates. Filename changes happen during real optimize/upload.
-        includeOptimized: Boolean(
-          settings?.is_alt_text_template_enabled
-        ),
+        includeOptimized: false,
         productSortDirection:
           settings?.product_sort_direction === "desc" ? "desc" : "asc",
       });
@@ -129,7 +129,7 @@ async function startWorker() {
         store_name: store_name || null,
         estimatedImages: queuedImages,
         suppressHeavyWake: false,
-        selectedPlan: selectedPlan || "free",
+        selectedPlan: resolvedPlanSlug,
       });
 
       if (queueError) {

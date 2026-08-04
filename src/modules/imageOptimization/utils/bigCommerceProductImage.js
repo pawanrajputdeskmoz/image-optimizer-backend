@@ -345,12 +345,11 @@ async function replaceProductImage({
     };
   }
 
+  // Always trust BC's current thumbnail flag on the image being replaced.
+  // A stale/false isThumbnail override must not drop an existing thumbnail.
   const shouldKeepThumbnail =
-    isThumbnail != null
-      ? Boolean(isThumbnail)
-      : Boolean(oldImage?.is_thumbnail);
+    Boolean(oldImage?.is_thumbnail) || isThumbnail === true;
 
-  // Set thumbnail on upload when needed so we can skip a follow-up PUT.
   const uploadResult = await uploadProductImage({
     storeHash,
     productId,
@@ -370,28 +369,94 @@ async function replaceProductImage({
     throw new Error("Failed to upload optimized image to BigCommerce");
   }
 
-  // Fire-and-forget: nothing downstream consumes the delete result, so don't
-  // block the response on it. One delayed retry covers transient BC errors
-  // (deleteProductImage already treats 404 as success).
-  deleteProductImage({
-    storeHash,
-    productId,
-    imageId: oldImageId,
-    accessToken,
-  })
-    .catch(() =>
-      sleep(1500).then(() =>
-        deleteProductImage({ storeHash, productId, imageId: oldImageId, accessToken })
-      )
-    )
-    .catch((err) => {
-      console.error("[replaceProductImage] old image delete failed", {
+  const applyThumbnail = () =>
+    updateProductImageMetadata({
+      storeHash,
+      productId,
+      imageId: newImageId,
+      accessToken,
+      sortOrder: sortOrder != null ? sortOrder : oldImage?.sort_order,
+      isThumbnail: true,
+    });
+
+  if (shouldKeepThumbnail) {
+    // BC often ignores create-time is_thumbnail while another thumb still exists.
+    // Mark the new image explicitly, then delete the old thumb, then re-apply.
+    await applyThumbnail().catch((err) => {
+      console.error("[replaceProductImage] thumbnail pre-set failed", {
+        storeHash,
+        productId,
+        newImageId,
+        error: err?.message || err?.error || err,
+      });
+    });
+
+    try {
+      await deleteProductImage({
+        storeHash,
+        productId,
+        imageId: oldImageId,
+        accessToken,
+      });
+    } catch (err) {
+      console.error("[replaceProductImage] old thumbnail delete failed", {
         storeHash,
         productId,
         oldImageId,
         error: err?.message,
       });
+      await sleep(1500);
+      await deleteProductImage({
+        storeHash,
+        productId,
+        imageId: oldImageId,
+        accessToken,
+      }).catch((retryErr) => {
+        console.error("[replaceProductImage] old thumbnail delete retry failed", {
+          storeHash,
+          productId,
+          oldImageId,
+          error: retryErr?.message,
+        });
+      });
+    }
+
+    // Deleting the previous thumbnail image can clear product thumbnail state.
+    await applyThumbnail().catch((err) => {
+      console.error("[replaceProductImage] thumbnail re-apply failed", {
+        storeHash,
+        productId,
+        newImageId,
+        error: err?.message || err?.error || err,
+      });
     });
+  } else {
+    // Non-thumbnail images: fire-and-forget delete (same as before).
+    deleteProductImage({
+      storeHash,
+      productId,
+      imageId: oldImageId,
+      accessToken,
+    })
+      .catch(() =>
+        sleep(1500).then(() =>
+          deleteProductImage({
+            storeHash,
+            productId,
+            imageId: oldImageId,
+            accessToken,
+          })
+        )
+      )
+      .catch((err) => {
+        console.error("[replaceProductImage] old image delete failed", {
+          storeHash,
+          productId,
+          oldImageId,
+          error: err?.message,
+        });
+      });
+  }
 
   let verification = { verified: true, attempts: 0, skipped: true };
   if (verifyMaxRetries > 0) {
@@ -411,6 +476,7 @@ async function replaceProductImage({
     newImage,
     newImageId,
     verification,
+    thumbnailPreserved: shouldKeepThumbnail,
   };
 }
 

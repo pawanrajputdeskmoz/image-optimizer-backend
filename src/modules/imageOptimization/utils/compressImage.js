@@ -23,6 +23,9 @@ const {
 } = require("../services");
 const { recordMonthlyOptimization } = require("../../../utils/monthlyUsage");
 const { notifyPlanLimitReached } = require("../../../utils/planLimitNotify");
+const {
+  adjustCatalogPendingImages,
+} = require("../../../utils/storePendingImages");
 const { appendImageLog, resolveJobUuid } = require("./imageActivityLog");
 const {
   replaceProductImage,
@@ -85,13 +88,15 @@ exports.compressImage = async ({
     const User = require("../../../models/User");
     const {
       canOptimizeImages,
+      getStorePlanSlug,
       MONTHLY_PLAN_LIMIT_MESSAGE,
     } = require("../../plans/service");
-    const user = await User.findOne({ store_hash: storeHash })
-      .select({ selectedPlan: 1 })
-      .lean();
+    const [user, planSlug] = await Promise.all([
+      User.findOne({ store_hash: storeHash }).select({ _id: 1 }).lean(),
+      getStorePlanSlug(storeHash, "free"),
+    ]);
     userId = userId || user?._id || null;
-    const quota = await canOptimizeImages(storeHash, user?.selectedPlan || "free", 1);
+    const quota = await canOptimizeImages(storeHash, planSlug, 1);
     if (!quota.allowed) {
       await notifyPlanLimitReached(storeHash, {
         message: quota.message,
@@ -520,7 +525,11 @@ exports.compressImage = async ({
     if (runFilename || runAltText) {
       const metadataPayload = {};
       if (sortOrder != null) metadataPayload.sortOrder = sortOrder;
-      if (isThumbnail != null) metadataPayload.isThumbnail = isThumbnail;
+      // Never send is_thumbnail:false after replace — it can clear the
+      // thumbnail we just preserved on the newly uploaded image.
+      if (replacementResult?.thumbnailPreserved || isThumbnail === true) {
+        metadataPayload.isThumbnail = true;
+      }
       if (runFilename && newImageName) metadataPayload.imageFile = newImageName;
       if (runAltText && preservedNewAltText) {
         metadataPayload.description = preservedNewAltText;
@@ -720,6 +729,7 @@ exports.compressImage = async ({
         skipReason: "Image optimized elsewhere",
         excludeJobUuid: effectiveLogContext?.jobUuid || null,
       }),
+      adjustCatalogPendingImages(storeHash, -1, userId),
     ]).catch((err) => {
       console.warn("[compressImage] background finalize failed:", err?.message || err);
     });

@@ -27,6 +27,7 @@ const {
   formatClientPlan,
   listStoreMonthlyUsageHistory,
   getMonthlyQuotaStatus,
+  getStorePlanSlug,
 } = require("../plans/service");
 
 function clampCount(value) {
@@ -197,6 +198,7 @@ exports.getClientDashboardStats = async (storeHash, selectedPlan = null) => {
   }
 
   try {
+    const planSlug = selectedPlan || (await getStorePlanSlug(storeHash, "free"));
     const [
       { error: statsError, data: stats },
       quota,
@@ -205,7 +207,7 @@ exports.getClientDashboardStats = async (storeHash, selectedPlan = null) => {
       pendingRestoreImages,
     ] = await Promise.all([
       getStoreDashboardStats(storeHash),
-      getMonthlyQuotaStatus(storeHash, selectedPlan || "free"),
+      getMonthlyQuotaStatus(storeHash, planSlug),
       getStoreActiveBulkJobs(storeHash),
       ImageJob.countDocuments({
         store_hash: storeHash,
@@ -229,7 +231,7 @@ exports.getClientDashboardStats = async (storeHash, selectedPlan = null) => {
     const optimizedImages = clampCount(stats?.optimized_images);
     const totalSavedBytes = clampCount(stats?.total_saved_bytes);
     const pendingRestore = clampCount(pendingRestoreImages);
-    const plan = quota.plan || (await resolvePlanForDashboard(selectedPlan));
+    const plan = quota.plan || (await resolvePlanForDashboard(planSlug));
     const monthlyLimit =
       quota.monthly_limit == null ? null : clampCount(quota.monthly_limit);
     const monthlyUsed = clampCount(quota.monthly_used);
@@ -270,7 +272,7 @@ exports.getClientDashboardStats = async (storeHash, selectedPlan = null) => {
           used: monthlyUsed,
           limit: monthlyLimit,
           remaining: monthlyRemaining,
-          plan: quota.plan_slug || plan?.slug || selectedPlan || "free",
+          plan: quota.plan_slug || plan?.slug || planSlug || "free",
           plan_name: quota.plan_name || plan?.name || "Free",
           plan_price: plan?.price ?? 0,
           subtitle: "Current monthly usage",

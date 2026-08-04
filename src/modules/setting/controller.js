@@ -347,8 +347,7 @@ exports.disableCategoryCreatedWebhookHandler = async (req, reply) => {
 exports.getClientDashboardStatsHandler = async (req, reply) => {
   try {
     const storeHash = req.storeHash;
-    const selectedPlan = req.currentUser?.selectedPlan || "free";
-    const { error, data } = await getClientDashboardStats(storeHash, selectedPlan);
+    const { error, data } = await getClientDashboardStats(storeHash);
 
     if (error) {
       return reply.status(500).send({

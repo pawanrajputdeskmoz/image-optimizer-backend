@@ -10,6 +10,7 @@ const { getOptimizationJobStatus } = require("../../imageOptimization/services")
 const {
   getEffectivePlanForStore,
   getClientPlanByStore,
+  getStorePlanSlug,
   upsertClientPlan,
   deleteClientPlan,
   listPlans,
@@ -29,7 +30,6 @@ const CLIENT_PROFILE_FIELDS = {
   primaryDomain: 1,
   installStatus: 1,
   hasCompletedSetup: 1,
-  selectedPlan: 1,
   lastInstalledAt: 1,
   lastUninstalledAt: 1,
   lastLogin: 1,
@@ -332,16 +332,17 @@ exports.resetStuckJobItems = async (jobUuid, storeHash = null) => {
 
 exports.getClientPlanConfig = async (storeHash) => {
   const client = await User.findOne({ store_hash: storeHash })
-    .select({ store_hash: 1, selectedPlan: 1, store_name: 1 })
+    .select({ store_hash: 1, store_name: 1 })
     .lean();
 
   if (!client) {
     return { error: "Client not found", data: null };
   }
 
+  const selectedPlan = await getStorePlanSlug(storeHash, "free");
   const [clientPlan, effectivePlan, globalPlans] = await Promise.all([
     getClientPlanByStore(storeHash),
-    getEffectivePlanForStore(storeHash, client.selectedPlan || "free"),
+    getEffectivePlanForStore(storeHash, selectedPlan),
     listPlans({ activeOnly: true }),
   ]);
 
@@ -350,7 +351,7 @@ exports.getClientPlanConfig = async (storeHash) => {
     data: {
       store_hash: storeHash,
       store_name: client.store_name || null,
-      selected_plan: client.selectedPlan || "free",
+      selected_plan: selectedPlan,
       client_plan: clientPlan,
       effective_plan: effectivePlan,
       global_plans: globalPlans,

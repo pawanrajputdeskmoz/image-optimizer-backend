@@ -80,6 +80,7 @@ const {
   canOptimizeImages,
   buildPlanLimitApiBody,
   clearPausedPlanLimitJobs,
+  getStorePlanSlug,
 } = require("../plans/service");
 const { adjustPendingImages } = require("../../utils/storePendingImages");
 const { notifyPlanLimitReached } = require("../../utils/planLimitNotify");
@@ -276,6 +277,7 @@ exports.fetchAllProducts = async (req, reply) => {
 
     const statusByImageId = Object.create(null);
     const sizeByImageId = Object.create(null);
+    const savedPercentageByImageId = Object.create(null);
 
     const [imageStatusRows, oldDataRows] = await Promise.all([
       imageIds.length > 0
@@ -287,7 +289,6 @@ exports.fetchAllProducts = async (req, reply) => {
             {
               image_id: 1,
               status: 1,
-              image_update_status: 1,
               _id: 0,
             }
           ).lean()
@@ -300,8 +301,9 @@ exports.fetchAllProducts = async (req, reply) => {
             },
             {
               image_id: 1,
-              original: 1,
-              optimized: 1,
+              "original.size": 1,
+              "optimized.size": 1,
+              saved_percentage: 1,
               _id: 0,
             }
           ).lean()
@@ -310,38 +312,36 @@ exports.fetchAllProducts = async (req, reply) => {
 
     for (let i = 0; i < imageStatusRows.length; i++) {
       const row = imageStatusRows[i];
-
-      statusByImageId[row.image_id] = {
-        optimization_status: row.status,
-        image_update_status: row.image_update_status || "pending",
-      };
+      statusByImageId[row.image_id] = row.status;
     }
 
     for (let i = 0; i < oldDataRows.length; i++) {
       const row = oldDataRows[i];
       // Prefer optimized size when present (current BC file after optimize).
-      // Fall back to original only if optimized is missing (e.g. incomplete row).
-      const source =
-        row.optimized?.size > 0
-          ? row.optimized
-          : row.original?.size > 0
-            ? row.original
+      const optimizedSize = row.optimized?.size;
+      const originalSize = row.original?.size;
+      const bytes =
+        optimizedSize > 0
+          ? optimizedSize
+          : originalSize > 0
+            ? originalSize
             : null;
 
-      if (!source) continue;
+      if (bytes != null) {
+        sizeByImageId[row.image_id] = bytes;
+      }
 
-      sizeByImageId[row.image_id] = {
-        bytes: source.size ?? null,
-        width: source.width ?? null,
-        height: source.height ?? null,
-        format: source.format ?? null,
-      };
+      if (
+        typeof row.saved_percentage === "number" &&
+        Number.isFinite(row.saved_percentage)
+      ) {
+        savedPercentageByImageId[row.image_id] = row.saved_percentage;
+      }
     }
 
-    const itemsNeedingSizeFetch = imageUrlItems.filter((item) => {
-      const cached = sizeByImageId[item.imageId];
-      return !cached?.bytes || !cached?.width || !cached?.height;
-    });
+    const itemsNeedingSizeFetch = imageUrlItems.filter(
+      (item) => sizeByImageId[item.imageId] == null
+    );
 
     if (itemsNeedingSizeFetch.length > 0) {
       const fetchedSizes = await getImageSizesFromUrls(itemsNeedingSizeFetch, {
@@ -349,7 +349,10 @@ exports.fetchAllProducts = async (req, reply) => {
       });
 
       for (const imageId of Object.keys(fetchedSizes)) {
-        sizeByImageId[imageId] = fetchedSizes[imageId];
+        const bytes = fetchedSizes[imageId]?.bytes;
+        if (typeof bytes === "number" && Number.isFinite(bytes)) {
+          sizeByImageId[imageId] = bytes;
+        }
       }
     }
 
@@ -380,7 +383,7 @@ exports.fetchAllProducts = async (req, reply) => {
 
     /**
      * ------------------------------------------------
-     * 10. Attach Optimization Status + Size
+     * 10. Attach only frontend-used image fields
      * ------------------------------------------------
      */
 
@@ -395,34 +398,30 @@ exports.fetchAllProducts = async (req, reply) => {
       for (let j = 0; j < images.length; j++) {
         const image = images[j];
 
-        const statusInfo = statusByImageId[image.id] || {
-          optimization_status: "pending",
-          image_update_status: "pending",
-        };
-
-        const rawStatus = String(statusInfo.optimization_status || "pending");
-        image.product_id = product.id;
+        const rawStatus = String(statusByImageId[image.id] || "pending");
         image.image_file = normalizeImageFile(image.image_file);
         image.optimization_status =
           rawStatus === "optimized" || rawStatus === "complete"
             ? "optimized"
             : rawStatus;
-        image.image_update_status = statusInfo.image_update_status;
 
-        const sizeInfo = sizeByImageId[image.id];
-        image.size = sizeInfo
-          ? {
-            bytes: sizeInfo.bytes,
-            width: sizeInfo.width,
-            height: sizeInfo.height,
-            format: sizeInfo.format,
-          }
-          : {
-            bytes: null,
-            width: null,
-            height: null,
-            format: null,
-          };
+        const bytes = sizeByImageId[image.id];
+        image.size = {
+          bytes: typeof bytes === "number" ? bytes : null,
+        };
+
+        const savedPercentage = savedPercentageByImageId[image.id];
+        image.saved_percentage =
+          typeof savedPercentage === "number" ? savedPercentage : null;
+
+        // Drop fields the product listing frontend does not use.
+        delete image.product_id;
+        delete image.url_standard;
+        delete image.url_zoom;
+        delete image.url_tiny;
+        delete image.date_modified;
+        delete image.image_update_status;
+        delete image.saved_bytes;
       }
     }
 
@@ -973,8 +972,7 @@ exports.singleImageOptimization = async (req, reply) => {
 
     const planLimitReply = await replyIfMonthlyPlanLimitExceeded(
       reply,
-      storeHash,
-      req.currentUser?.selectedPlan
+      storeHash
     );
     if (planLimitReply) {
       return planLimitReply;
@@ -1120,11 +1118,8 @@ exports.bulkImageOptimization = async (req, reply) => {
 
     await clearPausedPlanLimitJobs(storeHash).catch(() => {});
 
-    const quota = await canOptimizeImages(
-      storeHash,
-      req.currentUser?.selectedPlan || "free",
-      1
-    );
+    const planSlug = await getStorePlanSlug(storeHash, "free");
+    const quota = await canOptimizeImages(storeHash, planSlug, 1);
     if (!quota.allowed) {
       await notifyPlanLimitReached(storeHash, {
         message: quota.message,
@@ -1177,7 +1172,7 @@ exports.bulkImageOptimization = async (req, reply) => {
         settings,
         currency: req.currentUser?.currency || null,
         store_name: req.currentUser?.store_name || null,
-        selectedPlan: req.currentUser?.selectedPlan || "free",
+        selectedPlan: planSlug,
         maxQueueImages: quota.unlimited ? null : Math.max(0, Number(quota.remaining) || 0),
       },
       coordinatorWorkerJobOptions()
@@ -1616,8 +1611,9 @@ exports.updateAltText = async (req, reply) => {
 // Helpers
 //=======================================================
 
-async function replyIfMonthlyPlanLimitExceeded(reply, storeHash, selectedPlan) {
-  const quota = await canOptimizeImages(storeHash, selectedPlan || "free", 1);
+async function replyIfMonthlyPlanLimitExceeded(reply, storeHash) {
+  const planSlug = await getStorePlanSlug(storeHash, "free");
+  const quota = await canOptimizeImages(storeHash, planSlug, 1);
   if (!quota.allowed) {
     await notifyPlanLimitReached(storeHash, {
       message: quota.message,
@@ -1649,11 +1645,8 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
 
     await clearPausedPlanLimitJobs(storeHash).catch(() => {});
 
-    const quota = await canOptimizeImages(
-      storeHash,
-      req.currentUser?.selectedPlan || "free",
-      1
-    );
+    const planSlug = await getStorePlanSlug(storeHash, "free");
+    const quota = await canOptimizeImages(storeHash, planSlug, 1);
     if (!quota.allowed) {
       await notifyPlanLimitReached(storeHash, {
         message: quota.message,
@@ -1931,7 +1924,7 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
           store_name: storeTemplateOptions.store_name || null,
           estimatedImages: toQueue.length,
           suppressHeavyWake: true,
-          selectedPlan: req.currentUser?.selectedPlan || "free",
+          selectedPlan: planSlug,
         });
 
       if (batchQueueError) {
@@ -1942,11 +1935,7 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
       }
 
       if (paused) {
-        return replyIfMonthlyPlanLimitExceeded(
-          reply,
-          storeHash,
-          req.currentUser?.selectedPlan
-        );
+        return replyIfMonthlyPlanLimitExceeded(reply, storeHash);
       }
 
       if (queueTier === TIER_HEAVY) {

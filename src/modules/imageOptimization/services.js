@@ -40,6 +40,7 @@ const {
   canOptimizeImages,
   pauseJobForPlanLimit,
   getMonthlyQuotaStatus,
+  getStorePlanSlug,
 } = require("../plans/service");
 const {
   webhookWorkerJobOptions,
@@ -59,6 +60,9 @@ const {
   appendWebhookLog,
   buildBurstTraceId,
 } = require("../installation/utils/webhookActivityLog");
+const {
+  setCatalogPendingImages,
+} = require("../../utils/storePendingImages");
 const config = require("../../config");
 const { storeDefaults: DEFAULT_STORE_SETTINGS } = config;
 
@@ -1009,6 +1013,8 @@ exports.streamCatalogFetchToJobItems = async ({
   let skippedAlreadyOptimized = 0;
   let queuedImages = 0;
   let quotaDeferredImages = 0;
+  let totalCatalogImages = 0;
+  let catalogPendingImages = 0;
   let batchIndex = 0;
   let pendingBatch = [];
   const discoveredForStats = [];
@@ -1087,31 +1093,56 @@ exports.streamCatalogFetchToJobItems = async ({
         }
       }
 
-      let toQueue = pageItems;
+      totalCatalogImages += pageItems.length;
 
-      if (skipOptimized && pageItems.length > 0) {
+      let toQueue = pageItems;
+      let catalogExcludedKeys = new Set();
+
+      if (pageItems.length > 0) {
+        const productIds = [
+          ...new Set(pageItems.map((row) => Number(row.product_id))),
+        ];
         const imageIds = pageItems.map((row) => Number(row.image_id));
         const statusRows = await ImageStatus.find({
           store_hash: storeHash,
+          product_id: { $in: productIds },
           image_id: { $in: imageIds },
-          status: {
-            $in: includeOptimized
-              ? ["optimizing", "pending"]
-              : Array.from(SKIP_QUEUE_STATUSES),
-          },
+          status: { $in: Array.from(SKIP_QUEUE_STATUSES) },
         })
-          .select({ image_id: 1 })
+          .select({ product_id: 1, image_id: 1, status: 1 })
           .lean();
 
-        const skipIds = new Set(statusRows.map((row) => Number(row.image_id)));
-        toQueue = [];
-        for (const row of pageItems) {
-          if (skipIds.has(Number(row.image_id))) {
-            skippedAlreadyOptimized += 1;
-            continue;
+        const queueExcludedKeys = new Set();
+        for (const row of statusRows) {
+          const key = `${Number(row.product_id)}:${Number(row.image_id)}`;
+          catalogExcludedKeys.add(key);
+          if (
+            !includeOptimized ||
+            row.status === "optimizing" ||
+            row.status === "pending"
+          ) {
+            queueExcludedKeys.add(key);
           }
-          toQueue.push(row);
         }
+
+        catalogPendingImages += pageItems.filter((row) => {
+          const key = `${Number(row.product_id)}:${Number(row.image_id)}`;
+          return !catalogExcludedKeys.has(key);
+        }).length;
+
+        if (skipOptimized) {
+          toQueue = [];
+          for (const row of pageItems) {
+            const key = `${Number(row.product_id)}:${Number(row.image_id)}`;
+            if (queueExcludedKeys.has(key)) {
+              skippedAlreadyOptimized += 1;
+              continue;
+            }
+            toQueue.push(row);
+          }
+        }
+      } else {
+        catalogPendingImages += 0;
       }
 
       for (const row of toQueue) {
@@ -1161,24 +1192,13 @@ exports.streamCatalogFetchToJobItems = async ({
 
     await flushBatch();
 
+    // Pending = queued only; deferred images are not processed this run.
     await registerPendingProductImages(storeHash, discoveredForStats, userId);
-
-    if (queueCap != null) {
-      const pendingDisplayCount = queuedImages + quotaDeferredImages;
-      await StoreImageStat.findOneAndUpdate(
-        { store_hash: storeHash },
-        {
-          $set: {
-            pending_images: pendingDisplayCount,
-            ...(userId ? { user_id: userId } : {}),
-          },
-          $setOnInsert: { store_hash: storeHash },
-        },
-        { upsert: true }
-      ).catch((err) => {
-        console.error("[streamCatalogFetchToJobItems] pending stat:", err.message);
-      });
-    }
+    await setCatalogPendingImages(storeHash, {
+      pending: catalogPendingImages,
+      totalCatalogImages,
+      userId,
+    });
 
     return {
       error: null,
@@ -1238,9 +1258,7 @@ exports.queueOptimizationBatchJobs = async ({
   const resolvedPlan =
     selectedPlan ||
     planSlug ||
-    (await User.findOne({ store_hash: storeHash }).select({ selectedPlan: 1 }).lean())
-      ?.selectedPlan ||
-    "free";
+    (await getStorePlanSlug(storeHash, "free"));
 
   return exports.dispatchOptimizationBatch({
     jobUuid,
@@ -1418,10 +1436,7 @@ exports.handleOptimizationBatchComplete = async (batchJobData = {}) => {
     return { error: null, next: null, done: true };
   }
 
-  const user = await User.findOne({ store_hash: storeHash })
-    .select({ selectedPlan: 1 })
-    .lean();
-  const planSlug = selectedPlan || user?.selectedPlan || "free";
+  const planSlug = selectedPlan || (await getStorePlanSlug(storeHash, "free"));
 
   const quota = await getMonthlyQuotaStatus(storeHash, planSlug);
   if (!quota.unlimited && quota.remaining <= 0) {
@@ -1706,12 +1721,15 @@ exports.getStoreDashboardStats = async (storeHash) => {
   try {
     const stat = await StoreImageStat.findOne({ store_hash: storeHash }).lean();
     const clamp = (n) => Math.max(0, Number(n) || 0);
+    const dashboardPending = stat?.last_catalog_sync_at
+      ? clamp(stat?.catalog_pending_images)
+      : clamp(stat?.pending_images);
 
     return {
       error: null,
       data: {
         optimized_images: clamp(stat?.optimized_images),
-        pending_images: clamp(stat?.pending_images),
+        pending_images: dashboardPending,
         failed_images: clamp(stat?.failed_images),
         total_saved_bytes: clamp(stat?.total_saved_bytes),
         average_saving_percent: Number(stat?.average_saving_percent) || 0,

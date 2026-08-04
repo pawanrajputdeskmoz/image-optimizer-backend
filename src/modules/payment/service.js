@@ -3,7 +3,6 @@ const config = require("../../config");
 const PaymentHistory = require("../../models/PaymentHistory");
 const Plan = require("../../models/Plan");
 const ClientPlan = require("../../models/ClientPlan");
-const User = require("../../models/User");
 const { getPlanBySlug, upgradeStorePlan } = require("../plans/service");
 const { syncCurrentMonthUsage } = require("../../utils/monthlyUsage");
 
@@ -112,6 +111,140 @@ async function saveSubscriptionPayment({
 }
 
 /**
+ * Cancel a PayPal billing subscription.
+ * 204 = cancelled; 404 / already-cancelled statuses are treated as success.
+ */
+async function cancelPaypalSubscription(subscriptionId, reason) {
+  const accessToken = await getPaypalAccessToken();
+  const { baseUrl } = config.paypal;
+  const reasonText = String(reason || "Cancelled by merchant").slice(0, 128);
+
+  const { status, data } = await axios.post(
+    `${baseUrl}/v1/billing/subscriptions/${encodeURIComponent(subscriptionId)}/cancel`,
+    { reason: reasonText },
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 30_000,
+      validateStatus: () => true,
+    }
+  );
+
+  if (status === 204 || status === 404) {
+    return { ok: true };
+  }
+
+  // PayPal returns 422 when the subscription is already cancelled / not cancellable.
+  const issue = String(data?.details?.[0]?.issue || data?.name || "").toUpperCase();
+  if (
+    status === 422 &&
+    (issue.includes("CANCEL") ||
+      issue.includes("INVALID_STATUS") ||
+      issue.includes("SUBSCRIPTION_STATUS_INVALID"))
+  ) {
+    return { ok: true, alreadyCancelled: true };
+  }
+
+  return {
+    ok: false,
+    error: data?.message || data?.name || `PayPal cancel failed (${status})`,
+    status,
+  };
+}
+
+/**
+ * Cancel the store's active/pending PayPal subscription and mark local status.
+ * No-ops when there is nothing to cancel.
+ * Pass `{ downgradeToFree: true }` to also reset the store to the free plan.
+ */
+exports.cancelStoreSubscription = async (
+  storeHash,
+  reason = "Cancelled by merchant",
+  { downgradeToFree = false } = {}
+) => {
+  if (!storeHash) {
+    return { cancelled: false, skipped: true };
+  }
+
+  const clientPlan = await ClientPlan.findOne({ store_hash: storeHash })
+    .select({ paypal_subscription_id: 1, paypal_plan_id: 1, subscription_status: 1 })
+    .lean();
+
+  const subscriptionId = trim(clientPlan?.paypal_subscription_id);
+  let cancelled = false;
+  let skipped = false;
+  let error = null;
+
+  if (!subscriptionId || clientPlan?.subscription_status === "cancel") {
+    skipped = true;
+  } else {
+    try {
+      const result = await cancelPaypalSubscription(subscriptionId, reason);
+      if (!result.ok) {
+        console.error("[paypal-cancel] failed:", result.error);
+        error = result.error;
+      } else {
+        cancelled = true;
+        await ClientPlan.updateOne(
+          { store_hash: storeHash },
+          { $set: { subscription_status: "cancel" } }
+        );
+      }
+    } catch (err) {
+      error = paypalErrorMessage(err);
+      console.error("[paypal-cancel]", error);
+    }
+  }
+
+  if (downgradeToFree) {
+    await applyCancelledSubscriptionLocally(
+      storeHash,
+      subscriptionId,
+      clientPlan?.paypal_plan_id || null
+    );
+  }
+
+  return {
+    cancelled,
+    skipped,
+    ...(error ? { error } : {}),
+    ...(subscriptionId ? { subscriptionId } : {}),
+  };
+};
+
+/** Mark subscription cancelled locally and move the store to the free plan. */
+async function applyCancelledSubscriptionLocally(storeHash, subscriptionId, paypalPlanId) {
+  const freePlan = await getPlanBySlug("free", { activeOnly: true });
+  const freePlanId = freePlan?._id || freePlan?.id || null;
+
+  await ClientPlan.findOneAndUpdate(
+    { store_hash: storeHash },
+    {
+      $set: {
+        subscription_status: "cancel",
+        ...(subscriptionId ? { paypal_subscription_id: subscriptionId } : {}),
+        ...(paypalPlanId ? { paypal_plan_id: paypalPlanId } : {}),
+        base_plan_slug: "free",
+        assigned_by: "system",
+        ...(freePlanId ? { plan_id: freePlanId } : {}),
+      },
+      $setOnInsert: { store_hash: storeHash, started_at: new Date() },
+    },
+    { upsert: true }
+  );
+
+  await syncCurrentMonthUsage(
+    storeHash,
+    "free",
+    freePlan?.monthly_image_limit ?? 100,
+    null,
+    freePlanId
+  );
+}
+
+/**
  * Upsert ClientPlan subscription state.
  * Pending: only PayPal ids + pending status (do NOT change plan yet).
  * Active: upgrade store plan, sync monthly usage limit, save payment history.
@@ -130,6 +263,16 @@ async function syncSubscription({
 
   const resolvedPaypalPlanId = paypalPlanId || existing?.paypal_plan_id || null;
   const plan = await resolvePlan(resolvedPaypalPlanId, null);
+
+  // Cancelled: stop paid access locally (PayPal already cancelled or webhook).
+  if (status === "cancel") {
+    await applyCancelledSubscriptionLocally(
+      resolvedStoreHash,
+      subscriptionId,
+      resolvedPaypalPlanId
+    );
+    return { storeHash: resolvedStoreHash, plan: null, status: "cancel" };
+  }
 
   // Pending checkout: link subscription only — keep current plan/limit untouched.
   if (!activate && status !== "active") {
@@ -158,13 +301,9 @@ async function syncSubscription({
   const planId = plan._id || plan.id || null;
 
   // Activate paid plan. upgradeStorePlan may no-op if ClientPlan was already
-  // marked early; always sync monthly usage + selectedPlan after that.
+  // marked early; always sync monthly usage + ClientPlan after that.
   await upgradeStorePlan(resolvedStoreHash, plan.slug);
   await Promise.all([
-    User.updateOne(
-      { store_hash: resolvedStoreHash },
-      { $set: { selectedPlan: plan.slug } }
-    ),
     syncCurrentMonthUsage(
       resolvedStoreHash,
       plan.slug,

@@ -37,6 +37,7 @@ const { defaultWorkerJobOptions } = require("../../queue/workerJobOptions");
 const {
   canOptimizeImages,
   buildPlanLimitApiBody,
+  getStorePlanSlug,
 } = require("../plans/service");
 const { notifyPlanLimitReached } = require("../../utils/planLimitNotify");
 
@@ -494,11 +495,8 @@ async function queueBulkBrandJobs(req, reply, jobType, itemsOverride = null) {
 
     const storeHash = req.storeHash;
 
-    const quota = await canOptimizeImages(
-      storeHash,
-      req.currentUser?.selectedPlan || "free",
-      1
-    );
+    const planSlug = await getStorePlanSlug(storeHash, "free");
+    const quota = await canOptimizeImages(storeHash, planSlug, 1);
     if (!quota.allowed) {
       await notifyPlanLimitReached(storeHash, {
         message: quota.message,

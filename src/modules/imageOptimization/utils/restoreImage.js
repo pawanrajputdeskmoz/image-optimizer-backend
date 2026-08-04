@@ -339,7 +339,8 @@ async function restoreSingleImage({
       fileName: uploadFileName,
       description,
       sortOrder,
-      isThumbnail: false,
+      // Preserve the current BC thumbnail image during restore.
+      isThumbnail: shouldKeepThumbnail,
       forceEmptyDescription: !description,
     });
   } catch (uploadErr) {
@@ -647,6 +648,9 @@ async function restoreSingleImage({
       },
     }
   );
+
+  // Do not touch pending_images / catalog_pending_images on restore.
+  // Pending is only for images waiting to be optimized; restore is unrelated.
 
   const oldAltText = imageOldData?.altText ?? null;
   const oldImageName = imageOldData?.imageName ?? null;

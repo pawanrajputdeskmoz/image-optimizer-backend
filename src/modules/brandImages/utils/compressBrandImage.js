@@ -74,12 +74,13 @@ exports.compressBrandImage = async ({
 
   if (!logContext?.skipQuotaCheck) {
     const User = require("../../../models/User");
-    const { canOptimizeImages } = require("../../plans/service");
-    const user = await User.findOne({ store_hash: storeHash })
-      .select({ selectedPlan: 1 })
-      .lean();
+    const { canOptimizeImages, getStorePlanSlug } = require("../../plans/service");
+    const [user, planSlug] = await Promise.all([
+      User.findOne({ store_hash: storeHash }).select({ _id: 1 }).lean(),
+      getStorePlanSlug(storeHash, "free"),
+    ]);
     userId = userId || user?._id || null;
-    const quota = await canOptimizeImages(storeHash, user?.selectedPlan || "free", 1);
+    const quota = await canOptimizeImages(storeHash, planSlug, 1);
     if (!quota.allowed) {
       await notifyPlanLimitReached(storeHash, {
         message: quota.message,

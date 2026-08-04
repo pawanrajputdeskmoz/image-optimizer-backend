@@ -273,6 +273,17 @@ exports.getClientPlanByStore = async (storeHash) => {
   return formatClientPlan(doc);
 };
 
+/** Current plan slug for a store — ClientPlan is source of truth. */
+exports.getStorePlanSlug = async (storeHash, fallbackSlug = "free") => {
+  if (!storeHash) {
+    return normalizeSlug(fallbackSlug) || "free";
+  }
+  const clientPlan = await ClientPlan.findOne({ store_hash: storeHash })
+    .select({ base_plan_slug: 1 })
+    .lean();
+  return normalizeSlug(clientPlan?.base_plan_slug || fallbackSlug) || "free";
+};
+
 exports.getEffectivePlanForStore = async (storeHash, fallbackSlug = "free") => {
   const clientPlan = await ClientPlan.findOne({ store_hash: storeHash }).lean();
   const baseSlug = normalizeSlug(clientPlan?.base_plan_slug || fallbackSlug || "free");
@@ -285,15 +296,38 @@ exports.getEffectivePlanForStore = async (storeHash, fallbackSlug = "free") => {
 
 async function assignStorePlan(storeHash, planSlug, { assignedBy = "client" } = {}) {
   const normalized = normalizeSlug(planSlug);
-  const [plan, existingClientPlan] = await Promise.all([
+  const [plan, existingClientPlan, user] = await Promise.all([
     exports.getPlanBySlug(normalized, { activeOnly: true }),
     ClientPlan.findOne({ store_hash: storeHash }).lean(),
+    User.findOne({ store_hash: storeHash }).select({ _id: 1, store_hash: 1 }).lean(),
   ]);
   if (!plan) {
     return { error: "Plan not found or inactive", user: null, client_plan: null, plan: null };
   }
 
+  if (!user) {
+    return { error: "Store not found", user: null, client_plan: null, plan: null };
+  }
+
   const isPaidPlan = Number(plan.price) > 0;
+
+  // Leaving a paid PayPal subscription for a free/unpaid plan — cancel on PayPal first.
+  if (!isPaidPlan) {
+    const { cancelStoreSubscription } = require("../payment/service");
+    const cancelResult = await cancelStoreSubscription(
+      storeHash,
+      "Switched to free plan"
+    );
+    if (cancelResult.error) {
+      return {
+        error: cancelResult.error || "Failed to cancel PayPal subscription",
+        user: null,
+        client_plan: null,
+        plan: null,
+      };
+    }
+  }
+
   const $set = {
     base_plan_slug: normalized,
     assigned_by: assignedBy,
@@ -301,17 +335,8 @@ async function assignStorePlan(storeHash, planSlug, { assignedBy = "client" } = 
   if (isPaidPlan && !existingClientPlan?.started_at) {
     $set.started_at = new Date();
   }
-
-  const user = await User.findOneAndUpdate(
-    { store_hash: storeHash },
-    { $set: { selectedPlan: normalized } },
-    { returnDocument: "after" }
-  )
-    .select({ selectedPlan: 1, store_hash: 1 })
-    .lean();
-
-  if (!user) {
-    return { error: "Store not found", user: null, client_plan: null, plan: null };
+  if (!isPaidPlan && existingClientPlan?.paypal_subscription_id) {
+    $set.subscription_status = "cancel";
   }
 
   const clientPlanDoc = await ClientPlan.findOneAndUpdate(
@@ -349,15 +374,37 @@ exports.upsertClientPlan = async (storeHash, payload = {}, assignedBy = null) =>
   }
 
   const baseSlug = normalizeSlug(payload.base_plan_slug || "free");
-  const [basePlan, existingClientPlan] = await Promise.all([
+  const [basePlan, existingClientPlan, user] = await Promise.all([
     exports.getPlanBySlug(baseSlug, { activeOnly: true }),
     ClientPlan.findOne({ store_hash: storeHash }).lean(),
+    User.findOne({ store_hash: storeHash }).select({ _id: 1 }).lean(),
   ]);
   if (!baseSlug || !basePlan) {
     return { error: "Invalid base_plan_slug", client_plan: null, effective_plan: null, resume: null };
   }
 
+  if (!user) {
+    return { error: "Store not found", client_plan: null, effective_plan: null, resume: null };
+  }
+
   const isPaidPlan = Number(basePlan.price) > 0;
+
+  if (!isPaidPlan) {
+    const { cancelStoreSubscription } = require("../payment/service");
+    const cancelResult = await cancelStoreSubscription(
+      storeHash,
+      "Plan changed to free by admin"
+    );
+    if (cancelResult.error) {
+      return {
+        error: cancelResult.error || "Failed to cancel PayPal subscription",
+        client_plan: null,
+        effective_plan: null,
+        resume: null,
+      };
+    }
+  }
+
   const $set = {
     base_plan_slug: baseSlug,
     assigned_by: assignedBy || "admin",
@@ -365,17 +412,8 @@ exports.upsertClientPlan = async (storeHash, payload = {}, assignedBy = null) =>
   if (isPaidPlan && !existingClientPlan?.started_at) {
     $set.started_at = new Date();
   }
-
-  const user = await User.findOneAndUpdate(
-    { store_hash: storeHash },
-    { $set: { selectedPlan: baseSlug } },
-    { returnDocument: "after" }
-  )
-    .select({ _id: 1 })
-    .lean();
-
-  if (!user) {
-    return { error: "Store not found", client_plan: null, effective_plan: null, resume: null };
+  if (!isPaidPlan && existingClientPlan?.paypal_subscription_id) {
+    $set.subscription_status = "cancel";
   }
 
   const clientPlanDoc = await ClientPlan.findOneAndUpdate(
@@ -415,14 +453,19 @@ exports.deleteClientPlan = async (storeHash) => {
     return { error: "storeHash is required", deleted: false, effective_plan: null, resume: null };
   }
 
+  // Best-effort PayPal cancel before resetting local plan.
+  try {
+    const { cancelStoreSubscription } = require("../payment/service");
+    const cancelResult = await cancelStoreSubscription(storeHash, "Plan removed by admin");
+    if (cancelResult.error) {
+      console.error("[deleteClientPlan] paypal cancel:", cancelResult.error);
+    }
+  } catch (err) {
+    console.error("[deleteClientPlan] paypal cancel:", err.message);
+  }
+
   const result = await ClientPlan.deleteOne({ store_hash: storeHash });
-  const user = await User.findOneAndUpdate(
-    { store_hash: storeHash },
-    { $set: { selectedPlan: "free" } },
-    { returnDocument: "after" }
-  )
-    .select({ _id: 1 })
-    .lean();
+  const user = await User.findOne({ store_hash: storeHash }).select({ _id: 1 }).lean();
   const freePlan = await exports.getPlanBySlug("free", { activeOnly: true });
   await ClientPlan.findOneAndUpdate(
     { store_hash: storeHash },
@@ -432,6 +475,7 @@ exports.deleteClientPlan = async (storeHash) => {
         ...(freePlan?.id ? { plan_id: freePlan.id } : {}),
         base_plan_slug: "free",
         assigned_by: "system",
+        subscription_status: "cancel",
       },
       $setOnInsert: { store_hash: storeHash },
     },
@@ -904,7 +948,7 @@ exports.upgradeStorePlan = async (storeHash, planSlug) => {
   }
 
   const user = await User.findOne({ store_hash: storeHash })
-    .select({ selectedPlan: 1, store_hash: 1 })
+    .select({ _id: 1, store_hash: 1 })
     .lean();
 
   if (!user) {
@@ -918,7 +962,7 @@ exports.upgradeStorePlan = async (storeHash, planSlug) => {
     };
   }
 
-  const currentSlug = normalizeSlug(user.selectedPlan || "free");
+  const currentSlug = await exports.getStorePlanSlug(storeHash, "free");
   const effectiveCurrent = await exports.getEffectivePlanForStore(storeHash, currentSlug);
   const [previousPlan, targetPlan] = await Promise.all([
     Promise.resolve(effectiveCurrent),

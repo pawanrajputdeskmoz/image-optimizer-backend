@@ -90,7 +90,6 @@ exports.buildInstallUpdatePayload = ({
   access_token,
   lastInstalledAt: new Date(),
   installStatus: "installed",
-  selectedPlan: "free",
   scope,
   email: user.email,
   username: `${storeInfo.first_name || ""} ${storeInfo.last_name || ""}`.trim(),

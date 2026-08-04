@@ -61,13 +61,6 @@ const UserSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-    selectedPlan: {
-      
-      type: String,
-      trim: true,
-      lowercase: true,
-      default: "free",
-    },
     primaryDomain: {
       type: String,
       lowercase: true,
@@ -107,8 +100,8 @@ UserSchema.methods.updateLastLogin = async function () {
   return this.save();
 };
 
-UserSchema.methods.needsSetup = function () { 
-  return !this.hasCompletedSetup || !this.selectedPlan || !this.primaryDomain;
+UserSchema.methods.needsSetup = function () {
+  return !this.hasCompletedSetup || !this.primaryDomain;
 };
 
 module.exports = mongoose.model("User", UserSchema);
