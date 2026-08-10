@@ -23,9 +23,6 @@ const {
 } = require("../services");
 const { recordMonthlyOptimization } = require("../../../utils/monthlyUsage");
 const { notifyPlanLimitReached } = require("../../../utils/planLimitNotify");
-const {
-  adjustCatalogPendingImages,
-} = require("../../../utils/storePendingImages");
 const { appendImageLog, resolveJobUuid } = require("./imageActivityLog");
 const {
   replaceProductImage,
@@ -522,7 +519,9 @@ exports.compressImage = async ({
       );
     }
 
-    if (runFilename || runAltText) {
+    // Sync filename / generated alt after replace. When alt generator is off,
+    // still re-apply preserved old alt so BC create-time description cannot drop it.
+    if (runFilename || runAltText || uploadDescription) {
       const metadataPayload = {};
       if (sortOrder != null) metadataPayload.sortOrder = sortOrder;
       // Never send is_thumbnail:false after replace — it can clear the
@@ -533,6 +532,8 @@ exports.compressImage = async ({
       if (runFilename && newImageName) metadataPayload.imageFile = newImageName;
       if (runAltText && preservedNewAltText) {
         metadataPayload.description = preservedNewAltText;
+      } else if (!runAltText && uploadDescription) {
+        metadataPayload.description = uploadDescription;
       }
 
       if (Object.keys(metadataPayload).length > 0) {
@@ -729,7 +730,6 @@ exports.compressImage = async ({
         skipReason: "Image optimized elsewhere",
         excludeJobUuid: effectiveLogContext?.jobUuid || null,
       }),
-      adjustCatalogPendingImages(storeHash, -1, userId),
     ]).catch((err) => {
       console.warn("[compressImage] background finalize failed:", err?.message || err);
     });

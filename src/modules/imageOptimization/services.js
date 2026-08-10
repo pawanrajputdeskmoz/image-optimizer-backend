@@ -6,6 +6,8 @@ const ImageJobItem = require("../../models/ImageJobItem");
 const ImageStatus = require("../../models/ImageStatus");
 const ImageOptimization = require("../../models/ImageOptimization");
 const ImageOptimizationLog = require("../../models/ImageOptimizationLog");
+const CategoryImageStatus = require("../../models/CategoryImageStatus");
+const BrandImageStatus = require("../../models/BrandImageStatus");
 const {
   normalizeJobType,
   JOB_TYPES,
@@ -61,7 +63,8 @@ const {
   buildBurstTraceId,
 } = require("../installation/utils/webhookActivityLog");
 const {
-  setCatalogPendingImages,
+  setCatalogImageStats,
+  adjustPendingImages,
 } = require("../../utils/storePendingImages");
 const config = require("../../config");
 const { storeDefaults: DEFAULT_STORE_SETTINGS } = config;
@@ -1014,7 +1017,6 @@ exports.streamCatalogFetchToJobItems = async ({
   let queuedImages = 0;
   let quotaDeferredImages = 0;
   let totalCatalogImages = 0;
-  let catalogPendingImages = 0;
   let batchIndex = 0;
   let pendingBatch = [];
   const discoveredForStats = [];
@@ -1096,7 +1098,6 @@ exports.streamCatalogFetchToJobItems = async ({
       totalCatalogImages += pageItems.length;
 
       let toQueue = pageItems;
-      let catalogExcludedKeys = new Set();
 
       if (pageItems.length > 0) {
         const productIds = [
@@ -1115,7 +1116,6 @@ exports.streamCatalogFetchToJobItems = async ({
         const queueExcludedKeys = new Set();
         for (const row of statusRows) {
           const key = `${Number(row.product_id)}:${Number(row.image_id)}`;
-          catalogExcludedKeys.add(key);
           if (
             !includeOptimized ||
             row.status === "optimizing" ||
@@ -1124,11 +1124,6 @@ exports.streamCatalogFetchToJobItems = async ({
             queueExcludedKeys.add(key);
           }
         }
-
-        catalogPendingImages += pageItems.filter((row) => {
-          const key = `${Number(row.product_id)}:${Number(row.image_id)}`;
-          return !catalogExcludedKeys.has(key);
-        }).length;
 
         if (skipOptimized) {
           toQueue = [];
@@ -1141,8 +1136,6 @@ exports.streamCatalogFetchToJobItems = async ({
             toQueue.push(row);
           }
         }
-      } else {
-        catalogPendingImages += 0;
       }
 
       for (const row of toQueue) {
@@ -1194,8 +1187,7 @@ exports.streamCatalogFetchToJobItems = async ({
 
     // Pending = queued only; deferred images are not processed this run.
     await registerPendingProductImages(storeHash, discoveredForStats, userId);
-    await setCatalogPendingImages(storeHash, {
-      pending: catalogPendingImages,
+    await setCatalogImageStats(storeHash, {
       totalCatalogImages,
       userId,
     });
@@ -1642,15 +1634,7 @@ async function registerPendingProductImages(storeHash, images = [], userId = nul
       (Number(bulkResult.modifiedCount) || 0);
 
     if (registered > 0) {
-      await StoreImageStat.findOneAndUpdate(
-        { store_hash: storeHash },
-        {
-          $inc: { pending_images: registered },
-          ...(userId ? { $set: { user_id: userId } } : {}),
-          $setOnInsert: { store_hash: storeHash },
-        },
-        { upsert: true }
-      );
+      await adjustPendingImages(storeHash, registered, userId);
     }
 
     return { registered, error: null };
@@ -1719,11 +1703,23 @@ exports.getStoreDashboardStats = async (storeHash) => {
   }
 
   try {
-    const stat = await StoreImageStat.findOne({ store_hash: storeHash }).lean();
+    const pendingStatusFilter = { store_hash: storeHash, status: { $in: ["pending", "optimizing"] } };
+    const [stat, productPending, categoryPending, brandPending] = await Promise.all([
+      StoreImageStat.findOne({ store_hash: storeHash }).lean(),
+      ImageStatus.countDocuments(pendingStatusFilter),
+      CategoryImageStatus.countDocuments(pendingStatusFilter),
+      BrandImageStatus.countDocuments(pendingStatusFilter),
+    ]);
     const clamp = (n) => Math.max(0, Number(n) || 0);
-    const dashboardPending = stat?.last_catalog_sync_at
-      ? clamp(stat?.catalog_pending_images)
-      : clamp(stat?.pending_images);
+    // Live status rows are source of truth for queued/in-flight work.
+    // Counters can drift after restore / repeated checkbox runs; take the max
+    // so the dashboard always moves when checkbox optimization registers or finishes.
+    const livePending =
+      (Number(productPending) || 0) +
+      (Number(categoryPending) || 0) +
+      (Number(brandPending) || 0);
+    const pendingImages = Number(stat?.pending_images) || 0;
+    const dashboardPending = clamp(Math.max(livePending, pendingImages));
 
     return {
       error: null,
@@ -2360,16 +2356,10 @@ exports.recordOptimizationJobImageResult = async ({
     await Promise.all(logWrites);
 
     // Consume one dashboard pending slot when a queued item finishes
-    // (success or fail). Full compress always decrements.
-    // Metadata-only (optimize_image_enabled=false) also registered pending at
-    // queue time — only decrement when ImageStatus is still pending so
-    // already-optimized metadata updates are not counted twice.
+    // (success or fail). Metadata-only never registered a pending image.
     if (!skipped && job.store_hash) {
       if (!metadataOnly) {
-        await StoreImageStat.updateOne(
-          { store_hash: job.store_hash },
-          { $inc: { pending_images: -1 } }
-        ).catch((err) => {
+        await adjustPendingImages(job.store_hash, -1).catch((err) => {
           console.error("[recordOptimizationJobImageResult] pending stat:", err.message);
         });
       } else if (productId != null && imageId != null) {
@@ -2390,10 +2380,7 @@ exports.recordOptimizationJobImageResult = async ({
           });
 
           if (cleared) {
-            await StoreImageStat.updateOne(
-              { store_hash: job.store_hash },
-              { $inc: { pending_images: -1 } }
-            ).catch((err) => {
+            await adjustPendingImages(job.store_hash, -1).catch((err) => {
               console.error(
                 "[recordOptimizationJobImageResult] pending stat:",
                 err.message

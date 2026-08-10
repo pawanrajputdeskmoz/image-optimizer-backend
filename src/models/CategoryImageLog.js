@@ -88,6 +88,7 @@ const CategoryImageLogSchema = new mongoose.Schema(
       createdAt: "created_at",
       updatedAt: false,
     },
+    collection: "category_image_logs",
   }
 );
 

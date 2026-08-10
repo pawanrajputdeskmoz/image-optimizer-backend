@@ -148,6 +148,7 @@ const StoreOptimizationSettingsSchema = new mongoose.Schema(
       createdAt: "created_at",
       updatedAt: "updated_at",
     },
+    collection: "store_optimization_settings",
   }
 );
 

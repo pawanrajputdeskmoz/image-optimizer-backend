@@ -350,16 +350,24 @@ async function replaceProductImage({
   const shouldKeepThumbnail =
     Boolean(oldImage?.is_thumbnail) || isThumbnail === true;
 
+  // Prefer caller description (generated alt when enabled). If missing,
+  // preserve the existing BC description so optimize-only does not wipe alt.
+  const effectiveDescription =
+    normalizeUploadDescription(description) ||
+    normalizeUploadDescription(
+      oldImage?.description || oldImage?.alt_text || null
+    );
+
   const uploadResult = await uploadProductImage({
     storeHash,
     productId,
     accessToken,
     fileBuffer,
     fileName,
-    description,
+    description: effectiveDescription,
     sortOrder,
     isThumbnail: shouldKeepThumbnail,
-    forceEmptyDescription: !normalizeUploadDescription(description),
+    forceEmptyDescription: !effectiveDescription,
   });
 
   const newImage = uploadResult?.data || uploadResult;

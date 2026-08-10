@@ -35,6 +35,7 @@ const PlanLimitNotificationSchema = new mongoose.Schema(
       createdAt: "created_at",
       updatedAt: "updated_at",
     },
+    collection: "plan_limit_notifications",
   }
 );
 

@@ -144,6 +144,7 @@ const HomeBannerImageSchema = new mongoose.Schema(
       createdAt: "created_at",
       updatedAt: "updated_at",
     },
+    collection: "home_banner_images",
   }
 );
 

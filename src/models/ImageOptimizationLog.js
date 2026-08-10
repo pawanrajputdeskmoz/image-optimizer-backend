@@ -78,6 +78,7 @@ const ImageOptimizationLogSchema = new mongoose.Schema(
       createdAt: "created_at",
       updatedAt: false,
     },
+    collection: "image_optimization_logs",
   }
 );
 

@@ -24,11 +24,6 @@ const StoreImageStatSchema = new mongoose.Schema(
       default: 0,
     },
 
-    catalog_pending_images: {
-      type: Number,
-      default: 0,
-    },
-
     total_catalog_images: {
       type: Number,
       default: 0,
@@ -84,6 +79,7 @@ const StoreImageStatSchema = new mongoose.Schema(
       createdAt: "created_at",
       updatedAt: "updated_at",
     },
+    collection: "store_image_stats",
   }
 );
 

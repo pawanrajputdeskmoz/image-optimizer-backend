@@ -77,6 +77,7 @@ const BrandImageJobLogSchema = new mongoose.Schema(
       createdAt: "created_at",
       updatedAt: false,
     },
+    collection: "brand_image_job_logs",
   }
 );
 

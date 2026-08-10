@@ -89,6 +89,7 @@ const WebhookLogSchema = new mongoose.Schema(
       createdAt: "created_at",
       updatedAt: false,
     },
+    collection: "webhook_logs",
   }
 );
 

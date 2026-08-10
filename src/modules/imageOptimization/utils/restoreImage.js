@@ -10,6 +10,9 @@ const {
 const { deleteFile } = require("../../../utils/deleteFile");
 const { resolveProductImageUrl } = require("./urls");
 const {
+  adjustPendingImages,
+} = require("../../../utils/storePendingImages");
+const {
   uploadProductImage,
   deleteProductImage,
   updateProductImageMetadata,
@@ -584,8 +587,8 @@ async function restoreSingleImage({
     Number(imageOldData?.saved_bytes) ||
     (origSize > 0 ? Math.max(0, origSize - optSize) : 0);
 
-  // Restore must not change optimized_images / pending_images.
-  // pending_images is only for images waiting to be optimized.
+  // Restore returns the image to an unoptimized state — pending counters are
+  // bumped below so the dashboard reflects images waiting to be optimized again.
   const cleanupTasks = [
     ImageOptimization.deleteOne(lookup),
     ImageOldData.deleteOne(lookup),
@@ -649,8 +652,8 @@ async function restoreSingleImage({
     }
   );
 
-  // Do not touch pending_images / catalog_pending_images on restore.
-  // Pending is only for images waiting to be optimized; restore is unrelated.
+  // Restore returns the image to an unoptimized state — it needs optimize again.
+  await adjustPendingImages(storeHash, 1);
 
   const oldAltText = imageOldData?.altText ?? null;
   const oldImageName = imageOldData?.imageName ?? null;

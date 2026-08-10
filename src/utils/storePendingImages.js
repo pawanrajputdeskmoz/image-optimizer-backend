@@ -1,59 +1,51 @@
 const StoreImageStat = require("../models/StoreImageStat");
 
 /**
- * Adjust dashboard pending_images counter (can be negative for completions).
+ * Apply delta then floor at 0 so counters cannot drift negative.
+ */
+async function adjustCounterField(storeHash, field, delta, userId = null) {
+  const amount = Number(delta) || 0;
+  if (!storeHash || amount === 0) return { error: null };
+
+  try {
+    await StoreImageStat.findOneAndUpdate(
+      { store_hash: storeHash },
+      [
+        {
+          $set: {
+            [field]: {
+              $max: [
+                0,
+                { $add: [{ $ifNull: [`$${field}`, 0] }, amount] },
+              ],
+            },
+            ...(userId ? { user_id: userId } : {}),
+            store_hash: { $ifNull: ["$store_hash", storeHash] },
+          },
+        },
+      ],
+      { upsert: true }
+    );
+    return { error: null };
+  } catch (err) {
+    console.error(`[adjustCounterField:${field}]`, err.message);
+    return { error: err.message };
+  }
+}
+
+/**
+ * Adjust dashboard pending_images counter (floored at 0).
  */
 async function adjustPendingImages(storeHash, delta, userId = null) {
-  const amount = Number(delta) || 0;
-  if (!storeHash || amount === 0) return { error: null };
-
-  try {
-    await StoreImageStat.findOneAndUpdate(
-      { store_hash: storeHash },
-      {
-        $inc: { pending_images: amount },
-        ...(userId ? { $set: { user_id: userId } } : {}),
-        $setOnInsert: { store_hash: storeHash },
-      },
-      { upsert: true }
-    );
-    return { error: null };
-  } catch (err) {
-    console.error("[adjustPendingImages]", err.message);
-    return { error: err.message };
-  }
+  return adjustCounterField(storeHash, "pending_images", delta, userId);
 }
 
 /**
- * Adjust catalog-derived pending image count shown on the dashboard.
+ * Replace catalog totals after a fresh catalog scan.
  */
-async function adjustCatalogPendingImages(storeHash, delta, userId = null) {
-  const amount = Number(delta) || 0;
-  if (!storeHash || amount === 0) return { error: null };
-
-  try {
-    await StoreImageStat.findOneAndUpdate(
-      { store_hash: storeHash },
-      {
-        $inc: { catalog_pending_images: amount },
-        ...(userId ? { $set: { user_id: userId } } : {}),
-        $setOnInsert: { store_hash: storeHash },
-      },
-      { upsert: true }
-    );
-    return { error: null };
-  } catch (err) {
-    console.error("[adjustCatalogPendingImages]", err.message);
-    return { error: err.message };
-  }
-}
-
-/**
- * Replace dashboard catalog counts after a fresh catalog scan.
- */
-async function setCatalogPendingImages(
+async function setCatalogImageStats(
   storeHash,
-  { pending = 0, totalCatalogImages = 0, userId = null } = {}
+  { totalCatalogImages = 0, userId = null } = {}
 ) {
   if (!storeHash) return { error: null };
 
@@ -62,7 +54,6 @@ async function setCatalogPendingImages(
       { store_hash: storeHash },
       {
         $set: {
-          catalog_pending_images: Math.max(0, Number(pending) || 0),
           total_catalog_images: Math.max(0, Number(totalCatalogImages) || 0),
           last_catalog_sync_at: new Date(),
           ...(userId ? { user_id: userId } : {}),
@@ -73,13 +64,12 @@ async function setCatalogPendingImages(
     );
     return { error: null };
   } catch (err) {
-    console.error("[setCatalogPendingImages]", err.message);
+    console.error("[setCatalogImageStats]", err.message);
     return { error: err.message };
   }
 }
 
 module.exports = {
   adjustPendingImages,
-  adjustCatalogPendingImages,
-  setCatalogPendingImages,
+  setCatalogImageStats,
 };

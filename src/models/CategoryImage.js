@@ -46,6 +46,11 @@ const CategoryImageSchema = new mongoose.Schema(
       default: null,
     },
 
+    optimized_asset_id: {
+      type: String,
+      default: null,
+    },
+
     original_image_path: {
       type: String,
       default: null,
@@ -85,6 +90,7 @@ const CategoryImageSchema = new mongoose.Schema(
       createdAt: "created_at",
       updatedAt: "updated_at",
     },
+    collection: "category_images",
   }
 );
 

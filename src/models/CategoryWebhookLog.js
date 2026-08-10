@@ -84,6 +84,7 @@ const CategoryWebhookLogSchema = new mongoose.Schema(
       createdAt: "created_at",
       updatedAt: false,
     },
+    collection: "category_webhook_logs",
   }
 );
 

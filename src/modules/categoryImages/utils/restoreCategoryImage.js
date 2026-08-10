@@ -1,7 +1,6 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { CategoryImage, CategoryImageStatus } = require("../../../models");
-const { deleteFile } = require("../../../utils/deleteFile");
 const {
   uploadCategoryImage,
   verifyCategoryImageUpdate,
@@ -10,6 +9,9 @@ const {
   appendCategoryImageLog,
   standaloneCategoryJobUuid,
 } = require("./categoryActivityLog");
+const {
+  cleanupCategoryOptimizationRecords,
+} = require("./cleanupCategoryOptimizationRecords");
 
 async function logRestoreActivity({
   storeHash,
@@ -278,43 +280,22 @@ async function restoreSingleCategoryImage({
     });
   }
 
-  // Clean up optimization records from the database
-  const dbQuery = {
-    store_hash: storeHash,
-    channel_id: Number(channelId),
-    category_id: Number(categoryId),
-  };
+  const cleanup = await cleanupCategoryOptimizationRecords({
+    storeHash,
+    categoryId,
+    includeLogs: false,
+  });
 
-  try {
-    await Promise.all([
-      CategoryImage.deleteOne(dbQuery),
-      CategoryImageStatus.deleteOne(dbQuery),
-    ]);
-  } catch (dbCleanErr) {
-    console.error("[restoreSingleCategoryImage] DB cleanup error:", dbCleanErr.message);
+  if (!cleanup.cleaned && cleanup.hadRecords) {
     await logRestoreActivity({
       ...logBase,
       treeId: resolvedTreeId,
       logType: "warning",
       step: "file_cleanup",
       message: "Failed to fully clean up database records after category restore",
-      meta: { error: dbCleanErr.message },
+      meta: { error: cleanup.error },
     });
   }
-
-  // Delete local image files from disk
-  const optimizedPath = categoryImage?.optimized_image_path || null;
-
-  await Promise.all([
-    deleteFile(originalPath).catch((err) => {
-      console.error("[restoreSingleCategoryImage] delete original file:", err.message);
-    }),
-    optimizedPath
-      ? deleteFile(optimizedPath).catch((err) => {
-          console.error("[restoreSingleCategoryImage] delete optimized file:", err.message);
-        })
-      : Promise.resolve(),
-  ]);
 
   await logRestoreActivity({
     ...logBase,

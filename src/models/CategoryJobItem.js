@@ -89,6 +89,7 @@ const CategoryJobItemSchema = new mongoose.Schema(
       createdAt: "created_at",
       updatedAt: "updated_at",
     },
+    collection: "category_job_items",
   }
 );
 

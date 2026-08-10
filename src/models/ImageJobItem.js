@@ -104,6 +104,7 @@ const ImageJobItemSchema = new mongoose.Schema(
       createdAt: "created_at",
       updatedAt: "updated_at",
     },
+    collection: "image_job_items",
   }
 );
 

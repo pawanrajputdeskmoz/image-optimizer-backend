@@ -22,6 +22,15 @@ const {
 } = require("./categoryActivityLog");
 const { recordMonthlyOptimization } = require("../../../utils/monthlyUsage");
 const { notifyPlanLimitReached } = require("../../../utils/planLimitNotify");
+const {
+  extractCategoryImageAssetId,
+} = require("./categoryImageUrlUtils");
+const {
+  cleanupCategoryOptimizationRecords,
+} = require("./cleanupCategoryOptimizationRecords");
+const {
+  resolveCategoryOptimizeDecision,
+} = require("./categoryOptimizeDecision");
 
 function clampQuality(quality, fallback = 80) {
   const q = Number(quality);
@@ -152,6 +161,70 @@ exports.compressCategoryImage = async ({
   let optimizedImagePath = null;
 
   try {
+    const statusRow = await CategoryImageStatus.findOne({
+      store_hash: storeHash,
+      category_id: categoryId,
+    })
+      .select({ status: 1, optimized_asset_id: 1, optimized_url: 1 })
+      .lean();
+
+    const decision = resolveCategoryOptimizeDecision({
+      force,
+      statusRow,
+      liveImageUrl: imageUrl,
+    });
+
+    if (decision.skip) {
+      await logCategoryStep(effectiveLogContext, {
+        logType: "info",
+        step: "skip",
+        message: decision.reason,
+        meta: {
+          status: decision.status,
+          live_asset_id: decision.liveAssetId,
+          stored_asset_id: decision.storedAssetId,
+        },
+      });
+
+      return {
+        success: true,
+        skipped: true,
+        message: decision.reason,
+        data: {
+          category_id: Number(categoryId),
+          category_name: categoryName,
+          status: decision.status || "optimized",
+          old_image_url: imageUrl,
+          new_image_url: statusRow?.optimized_url || imageUrl,
+        },
+      };
+    }
+
+    if (decision.shouldCleanup) {
+      const cleanup = await cleanupCategoryOptimizationRecords({
+        storeHash,
+        categoryId,
+        includeLogs: false,
+      });
+
+      if (cleanup.hadRecords) {
+        await logCategoryStep(effectiveLogContext, {
+          logType: cleanup.cleaned ? "info" : "warning",
+          step: "file_cleanup",
+          message: cleanup.cleaned
+            ? "Removed previous category optimization records before optimize"
+            : "Failed to fully remove previous category optimization records",
+          meta: {
+            decision_reason: decision.reason,
+            deleted_image_records: cleanup.deletedImageRecords,
+            live_asset_id: decision.liveAssetId,
+            stored_asset_id: decision.storedAssetId,
+            error: cleanup.error,
+          },
+        });
+      }
+    }
+
     const {
       error: downloadError,
       originalImagePath: downloadedPath,
@@ -335,6 +408,8 @@ exports.compressCategoryImage = async ({
     const optimizedSize = optimizedImage.optimized?.size ?? 0;
 
     if (optimizedSize >= originalSize) {
+      const optimizedAssetId = extractCategoryImageAssetId(imageUrl);
+
       await Promise.all([
         CategoryImageStatus.updateOne(
           { store_hash: storeHash, category_id: categoryId },
@@ -344,6 +419,7 @@ exports.compressCategoryImage = async ({
               image_update_status: "complete",
               original_url: imageUrl,
               optimized_url: imageUrl,
+              optimized_asset_id: optimizedAssetId,
               optimized_at: new Date(),
               channel_id: channelId,
               ...(treeId != null ? { tree_id: treeId } : {}),
@@ -360,6 +436,7 @@ exports.compressCategoryImage = async ({
               category_name: categoryName,
               original_url: imageUrl,
               optimized_url: imageUrl,
+              optimized_asset_id: optimizedAssetId,
               original_image_path: originalImagePath,
               optimized_image_path: optimizedImagePath,
               original: {
@@ -517,6 +594,7 @@ exports.compressCategoryImage = async ({
 
     const savedBytes = sizeMeta.saved_bytes;
     const savedPercent = sizeMeta.saved_percentage;
+    const optimizedAssetId = extractCategoryImageAssetId(newImageUrl);
 
     await Promise.all([
       CategoryImage.updateOne(
@@ -528,6 +606,7 @@ exports.compressCategoryImage = async ({
             category_name: categoryName,
             original_url: imageUrl,
             optimized_url: newImageUrl,
+            optimized_asset_id: optimizedAssetId,
             original_image_path: originalImagePath,
             optimized_image_path: optimizedImagePath,
             original: sizeMeta.original,
@@ -546,6 +625,7 @@ exports.compressCategoryImage = async ({
             image_update_status: verification.verified ? "complete" : "failed",
             original_url: imageUrl,
             optimized_url: newImageUrl,
+            optimized_asset_id: optimizedAssetId,
             optimized_at: new Date(),
             channel_id: channelId,
             ...(treeId != null ? { tree_id: treeId } : {}),

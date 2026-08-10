@@ -98,10 +98,18 @@ async function startWorker() {
         const clientStatus = String(optimization_status || "").toLowerCase();
         const currentlyOptimizingOnClient = clientStatus === "optimizing";
 
-        const { skip, reason } = await shouldSkipCategoryOptimization(storeHash, categoryId);
+        const { skip, reason } = await shouldSkipCategoryOptimization(
+          storeHash,
+          categoryId,
+          {
+            imageUrl: imageUrl || null,
+            force: false,
+          }
+        );
 
         if (skip || currentlyOptimizingOnClient) {
-          const skipMessage = reason || "Category image is currently being optimized";
+          const skipMessage =
+            reason || "Category image is currently being optimized";
 
           if (jobUuid) {
             const { error: recordError } = await recordCategoryJobItemResult({

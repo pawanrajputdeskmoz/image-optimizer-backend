@@ -74,6 +74,7 @@ const StoreMonthlyUsageSchema = new mongoose.Schema(
       createdAt: "created_at",
       updatedAt: "updated_at",
     },
+    collection: "store_monthly_usages",
   }
 );
 

@@ -819,7 +819,10 @@ exports.singleImageOptimization = async (req, reply) => {
       "Content-Type": "application/json",
     };
 
-    const needsBcImage = !imageUrl || runFilename || runAltText;
+    // Always fetch BC image when optimizing so we can preserve existing
+    // description (alt text) when the alt-text generator is off.
+    const needsBcImage =
+      !imageUrl || runFilename || runAltText || runOptimize;
     const needsProductContext = runFilename || runAltText;
 
     const [bcImageResult, productContext] = await Promise.all([
@@ -1717,6 +1720,9 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
     // (BC supports description PUT). Filename applies during real
     // optimize/upload, so filename alone must not reopen optimized images.
     // Full bulk now follows the same rule.
+    //
+    // Do NOT block on ImageStatus "pending" — that means "needs optimize"
+    // (catalog sync / prior register), not "already handled".
     const metadataTemplatesOn =
       jobType === "checkBox" || jobType === "bulk"
         ? Boolean(settings.is_alt_text_template_enabled)
@@ -1725,8 +1731,8 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
               settings.is_alt_text_template_enabled
           );
     const blockingStatuses = metadataTemplatesOn
-      ? ["optimizing", "pending"]
-      : null;
+      ? ["optimizing"]
+      : ["optimized", "optimizing"];
 
     const skipOptimizedIds = forceReoptimize
       ? new Set()
@@ -1793,8 +1799,8 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
         item.optimization_status || item.status || ""
       ).toLowerCase();
       const clientBlockingStatuses = metadataTemplatesOn
-        ? ["optimizing", "pending"]
-        : ["optimized", "optimizing", "pending"];
+        ? ["optimizing"]
+        : ["optimized", "optimizing"];
       const alreadyOptimizedOnClient = clientBlockingStatuses.includes(
         clientStatus
       );

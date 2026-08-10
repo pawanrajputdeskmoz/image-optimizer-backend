@@ -11,7 +11,7 @@ const {
   fetchCategoryImages,
   optimizeCategoryImageSingle,
   restoreCategoryImageSingle,
-  getAlreadyOptimizedCategoryIdSet,
+  getCategoryOptimizeSkipDecisions,
   createCategoryBulkJob,
   writeCategorySkipLogs,
   getCategoryJobStatus,
@@ -627,9 +627,9 @@ async function queueBulkCategoryJobs(req, reply, jobType, itemsOverride = null) 
       req.body?.force_reoptimize === true ||
       req.body?.reoptimize === true;
 
-    const skipOptimizedIds = forceReoptimize
-      ? new Set()
-      : await getAlreadyOptimizedCategoryIdSet(storeHash, items);
+    const skipDecisions = forceReoptimize
+      ? new Map()
+      : await getCategoryOptimizeSkipDecisions(storeHash, items);
 
     for (let index = 0; index < items.length; index++) {
       const item = items[index] || {};
@@ -684,8 +684,11 @@ async function queueBulkCategoryJobs(req, reply, jobType, itemsOverride = null) 
       const clientStatus = String(item.optimization_status || item.status || "").toLowerCase();
       const currentlyOptimizingOnClient = clientStatus === "optimizing";
 
-      if (!forceReoptimize && (skipOptimizedIds.has(Number(categoryId)) || currentlyOptimizingOnClient)) {
-        pushSkipped("Category image is currently being optimized");
+      const skipReason = skipDecisions.get(Number(categoryId));
+      if (!forceReoptimize && (skipReason || currentlyOptimizingOnClient)) {
+        pushSkipped(
+          skipReason || "Category image is currently being optimized"
+        );
         continue;
       }
 
@@ -780,6 +783,8 @@ async function queueBulkCategoryJobs(req, reply, jobType, itemsOverride = null) 
             imageUrl: entry.imageUrl,
             categoryName: entry.categoryName,
             optimization_status: entry.optimization_status,
+            force: forceReoptimize,
+            force_reoptimize: forceReoptimize,
             settings,
           },
           defaultWorkerJobOptions()

@@ -63,6 +63,11 @@ const CategoryImageStatusSchema = new mongoose.Schema(
       default: null,
     },
 
+    optimized_asset_id: {
+      type: String,
+      default: null,
+    },
+
     optimization_started_at: {
       type: Date,
       default: null,
@@ -78,6 +83,7 @@ const CategoryImageStatusSchema = new mongoose.Schema(
       createdAt: "created_at",
       updatedAt: "updated_at",
     },
+    collection: "category_image_statuses",
   }
 );
 

@@ -28,7 +28,15 @@ const {
   buildCategoryBurstTraceId,
 } = require("../installation/utils/categoryWebhookActivityLog");
 const config = require("../../config");
-const { adjustPendingImages } = require("../../utils/storePendingImages");
+const {
+  adjustPendingImages,
+} = require("../../utils/storePendingImages");
+const {
+  extractCategoryImageAssetId,
+} = require("./utils/categoryImageUrlUtils");
+const {
+  resolveCategoryOptimizeDecision,
+} = require("./utils/categoryOptimizeDecision");
 
 const SKIP_PENDING_CATEGORY_STATUSES = new Set([
   "optimized",
@@ -36,8 +44,6 @@ const SKIP_PENDING_CATEGORY_STATUSES = new Set([
   "pending",
 ]);
 
-/** Category IDs whose status should prevent re-queuing (in-progress only). */
-const SKIP_CATEGORY_STATUSES = new Set(["optimizing"]);
 const RESTORE_SUCCESS_STATUSES = new Set(["restored"]);
 
 async function logCategoryOptimizationEvent({
@@ -182,6 +188,16 @@ function normalizeImageUrlForCompare(url) {
   return String(url || "").split("?")[0].toLowerCase();
 }
 
+function resolveStoredCategoryAssetId(imageRow, statusRow) {
+  return (
+    imageRow?.optimized_asset_id ||
+    statusRow?.optimized_asset_id ||
+    extractCategoryImageAssetId(imageRow?.optimized_url) ||
+    extractCategoryImageAssetId(statusRow?.optimized_url) ||
+    null
+  );
+}
+
 function getCategoryOptimizationStatus(liveImageUrl, imageRow, statusRow) {
   const rawStatus = String(statusRow?.status || "pending").toLowerCase();
   const live = normalizeImageUrlForCompare(liveImageUrl);
@@ -190,6 +206,19 @@ function getCategoryOptimizationStatus(liveImageUrl, imageRow, statusRow) {
 
   if (rawStatus === "optimizing" || rawStatus === "processing") {
     return "optimizing";
+  }
+
+  const liveAssetId = extractCategoryImageAssetId(liveImageUrl);
+  const storedAssetId = resolveStoredCategoryAssetId(imageRow, statusRow);
+
+  if (liveAssetId && storedAssetId) {
+    if (liveAssetId !== storedAssetId) {
+      return "pending";
+    }
+
+    if (["optimized", "uploaded"].includes(rawStatus)) {
+      return "optimized";
+    }
   }
 
   if (["optimized", "uploaded"].includes(rawStatus)) {
@@ -236,6 +265,7 @@ async function loadCategoryOptimizationStateFromDb(storeHash, categoryIds) {
         category_id: 1,
         original_url: 1,
         optimized_url: 1,
+        optimized_asset_id: 1,
         category_name: 1,
         original_image_path: 1,
         optimized_image_path: 1,
@@ -250,6 +280,8 @@ async function loadCategoryOptimizationStateFromDb(storeHash, categoryIds) {
       .select({
         category_id: 1,
         status: 1,
+        optimized_asset_id: 1,
+        optimized_url: 1,
         _id: 0,
       })
       .lean(),
@@ -426,7 +458,7 @@ async function shouldSkipCategoryOptimization(
   storeHash,
   channelId,
   categoryId,
-  { force = false, clientStatus = "" } = {}
+  { force = false, clientStatus = "", imageUrl = null } = {}
 ) {
   if (force) {
     return { skip: false };
@@ -443,16 +475,21 @@ async function shouldSkipCategoryOptimization(
   const statusRow = await CategoryImageStatus.findOne({
     store_hash: storeHash,
     category_id: categoryId,
-    status: "optimizing",
   })
-    .select({ status: 1 })
+    .select({ status: 1, optimized_asset_id: 1 })
     .lean();
 
-  if (statusRow) {
+  const decision = resolveCategoryOptimizeDecision({
+    force: false,
+    statusRow,
+    liveImageUrl: imageUrl,
+  });
+
+  if (decision.skip) {
     return {
       skip: true,
-      reason: "Category image is currently being optimized",
-      status: statusRow.status,
+      reason: decision.reason,
+      status: decision.status,
     };
   }
 
@@ -497,7 +534,7 @@ exports.optimizeCategoryImageSingle = async ({
       storeHash,
       resolvedChannelId,
       resolvedCategoryId,
-      { force, clientStatus }
+      { force, clientStatus, imageUrl: null }
     );
 
   if (skip) {
@@ -600,6 +637,38 @@ exports.optimizeCategoryImageSingle = async ({
         category_id: resolvedCategoryId,
         category_name: resolvedCategoryName,
         status: "no_image",
+      },
+    };
+  }
+
+  const { skip: skipAfterUrl, reason: skipReasonAfterUrl, status: statusAfterUrl } =
+    await shouldSkipCategoryOptimization(
+      storeHash,
+      resolvedChannelId,
+      resolvedCategoryId,
+      { force, clientStatus, imageUrl: resolvedImageUrl }
+    );
+
+  if (skipAfterUrl) {
+    await logCategoryOptimizationEvent({
+      storeHash,
+      channelId: resolvedChannelId,
+      treeId: resolvedTreeIdFromBc,
+      categoryId: resolvedCategoryId,
+      logType: "info",
+      step: "skip",
+      message: skipReasonAfterUrl || "Category image already optimized",
+      meta: { status: statusAfterUrl || "optimized", image_url: resolvedImageUrl },
+    });
+
+    return {
+      success: true,
+      skipped: true,
+      message: skipReasonAfterUrl || "Category image already optimized",
+      data: {
+        category_id: resolvedCategoryId,
+        category_name: resolvedCategoryName,
+        status: statusAfterUrl || "optimized",
       },
     };
   }
@@ -774,18 +843,12 @@ exports.fetchAllCategoryImagesInChunks = async ({
       }
 
       if (skipOptimized && pageItems.length > 0) {
-        const categoryIds = pageItems.map((item) => Number(item.category_id));
-        const statusRows = await CategoryImageStatus.find({
-          store_hash: storeHash,
-          category_id: { $in: categoryIds },
-          status: { $in: Array.from(SKIP_CATEGORY_STATUSES) },
-        })
-          .select({ category_id: 1 })
-          .lean();
-
-        const skipIds = new Set(statusRows.map((row) => Number(row.category_id)));
+        const skipDecisions = await exports.getCategoryOptimizeSkipDecisions(
+          storeHash,
+          pageItems
+        );
         for (const item of pageItems) {
-          if (skipIds.has(Number(item.category_id))) {
+          if (skipDecisions.has(Number(item.category_id))) {
             alreadyOptimizedSkipped++;
             continue;
           }
@@ -822,62 +885,105 @@ exports.fetchAllCategoryImagesInChunks = async ({
 //=======================================================
 
 /**
- * Category IDs that are already optimized / optimizing for this store.
- * Returns a Set<Number> of category_ids to skip.
+ * Categories that should be skipped during bulk/webhook queueing.
+ * Returns Map<categoryId, reason>:
+ * - currently optimizing
+ * - already optimized with the same live optimized_asset_id
  */
-exports.getAlreadyOptimizedCategoryIdSet = async (storeHash, items = []) => {
-  const skipIds = new Set();
-  if (!storeHash) return skipIds;
+exports.getCategoryOptimizeSkipDecisions = async (storeHash, items = []) => {
+  const decisions = new Map();
+  if (!storeHash) return decisions;
 
-  const categoryIds = [];
+  const normalizedItems = [];
   for (const item of Array.isArray(items) ? items : []) {
     const cid = Number(item?.category_id ?? item);
-    if (Number.isFinite(cid)) categoryIds.push(cid);
+    if (!Number.isFinite(cid) || cid <= 0) continue;
+    const imageUrl =
+      typeof item?.image_url === "string" && item.image_url.trim()
+        ? item.image_url.trim()
+        : null;
+    normalizedItems.push({ categoryId: cid, imageUrl });
   }
 
-  if (categoryIds.length === 0) return skipIds;
+  if (normalizedItems.length === 0) return decisions;
 
+  const categoryIds = [...new Set(normalizedItems.map((row) => row.categoryId))];
   const rows = await CategoryImageStatus.find({
     store_hash: storeHash,
     category_id: { $in: categoryIds },
-    status: { $in: Array.from(SKIP_CATEGORY_STATUSES) },
   })
-    .select({ category_id: 1 })
+    .select({ category_id: 1, status: 1, optimized_asset_id: 1 })
     .lean();
 
+  const statusByCategoryId = Object.create(null);
   for (const row of rows) {
-    if (row?.category_id != null) {
-      skipIds.add(Number(row.category_id));
+    statusByCategoryId[Number(row.category_id)] = row;
+  }
+
+  for (const item of normalizedItems) {
+    if (decisions.has(item.categoryId)) continue;
+
+    const decision = resolveCategoryOptimizeDecision({
+      force: false,
+      statusRow: statusByCategoryId[item.categoryId] || null,
+      liveImageUrl: item.imageUrl,
+    });
+
+    if (decision.skip) {
+      decisions.set(item.categoryId, decision.reason);
     }
   }
 
-  return skipIds;
+  return decisions;
+};
+
+/**
+ * Category IDs that should be skipped for this bulk batch.
+ * Returns a Set<Number> of category_ids to skip.
+ */
+exports.getAlreadyOptimizedCategoryIdSet = async (storeHash, items = []) => {
+  const decisions = await exports.getCategoryOptimizeSkipDecisions(
+    storeHash,
+    items
+  );
+  return new Set(decisions.keys());
 };
 
 /**
  * Worker-side check: should this category be skipped mid-queue?
  */
-exports.shouldSkipCategoryOptimization = async (storeHash, categoryId) => {
+exports.shouldSkipCategoryOptimization = async (
+  storeHash,
+  categoryId,
+  { imageUrl = null, force = false } = {}
+) => {
   const cid = Number(categoryId);
   if (!storeHash || !Number.isFinite(cid)) {
+    return { skip: false, reason: null };
+  }
+
+  if (force) {
     return { skip: false, reason: null };
   }
 
   const statusRow = await CategoryImageStatus.findOne({
     store_hash: storeHash,
     category_id: cid,
-    status: { $in: Array.from(SKIP_CATEGORY_STATUSES) },
   })
-    .select({ status: 1 })
+    .select({ status: 1, optimized_asset_id: 1 })
     .lean();
 
-  if (statusRow) {
+  const decision = resolveCategoryOptimizeDecision({
+    force: false,
+    statusRow,
+    liveImageUrl: imageUrl,
+  });
+
+  if (decision.skip) {
     return {
       skip: true,
-      reason:
-        statusRow.status === "optimizing"
-          ? "Category image is currently being optimized"
-          : "Category image should not be re-queued",
+      reason: decision.reason,
+      status: decision.status,
     };
   }
 
@@ -1233,7 +1339,7 @@ exports.recordCategoryJobItemResult = async ({
     }
 
     const storeHash = storeHashHint || updatedJob?.store_hash || null;
-    // Consume dashboard pending for finished optimize items (not skips/restores).
+    // Consume pending_images for finished optimize items (not skips/restores).
     if (
       !skipped &&
       !RESTORE_SUCCESS_STATUSES.has(String(successStatus || "").toLowerCase()) &&
@@ -1593,7 +1699,7 @@ exports.processWebhookCategoryBurst = async (storeHash) => {
     return { ignored: true, reason: "no_images", count };
   }
 
-  const skipOptimizedIds = await exports.getAlreadyOptimizedCategoryIdSet(
+  const skipDecisions = await exports.getCategoryOptimizeSkipDecisions(
     storeHash,
     categoryEntries
   );
@@ -1603,7 +1709,8 @@ exports.processWebhookCategoryBurst = async (storeHash) => {
   const jobUuid = crypto.randomUUID();
 
   for (const entry of categoryEntries) {
-    if (skipOptimizedIds.has(entry.category_id)) {
+    const skipReason = skipDecisions.get(entry.category_id);
+    if (skipReason) {
       jobItems.push({
         job_uuid: jobUuid,
         store_hash: storeHash,
@@ -1612,7 +1719,7 @@ exports.processWebhookCategoryBurst = async (storeHash) => {
         tree_id: entry.tree_id,
         image_url: entry.image_url,
         status: "skipped",
-        skip_reason: "Category image is currently being optimized",
+        skip_reason: skipReason,
       });
       continue;
     }

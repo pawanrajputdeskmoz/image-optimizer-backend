@@ -91,6 +91,7 @@ const ImageOldDataSchema = new mongoose.Schema(
       createdAt: "created_at",
       updatedAt: "updated_at",
     },
+    collection: "image_old_datas",
   }
 );
 
