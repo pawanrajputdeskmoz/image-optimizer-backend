@@ -23,6 +23,7 @@ const { addRestoreJob, pickRestoreQueueTier } = require("../../queue/imageRestor
 const { catalogFetchQueue } = require("../../queue/catalogFetchQueue");
 const { coordinatorWorkerJobOptions } = require("../../queue/workerJobOptions");
 const { restoreSingleImage } = require("./utils/restoreImage");
+const { RESTORE_BACKUP_DAYS, RESTORE_BACKUP_MS } = require("./utils/restoreImage");
 const {
   normalizePagination,
   buildBigCommerceError,
@@ -499,13 +500,15 @@ exports.getPreviewImgData = async (req, reply) => {
 
     const optimizationQuery = { store_hash: storeHash, image_id: imageId };
     const oldDataQuery = { store_hash: storeHash, image_id: imageId };
+    const statusQuery = { store_hash: storeHash, image_id: imageId };
 
     if (Number.isFinite(productId)) {
       optimizationQuery.product_id = productId;
       oldDataQuery.product_id = productId;
+      statusQuery.product_id = productId;
     }
 
-    const [imageOptimization, imageOldData] = await Promise.all([
+    const [imageOptimization, imageStatus, imageOldData] = await Promise.all([
       ImageOptimization.findOne(optimizationQuery)
         .select({
           store_hash: 1,
@@ -519,6 +522,14 @@ exports.getPreviewImgData = async (req, reply) => {
           optimization_type: 1,
           image_quality: 1,
           created_at: 1,
+          updated_at: 1,
+        })
+        .lean(),
+
+      ImageStatus.findOne(statusQuery)
+        .select({
+          status: 1,
+          optimized_at: 1,
           updated_at: 1,
         })
         .lean(),
@@ -548,6 +559,34 @@ exports.getPreviewImgData = async (req, reply) => {
         success: false,
         message: "Image preview data not found",
       });
+    }
+
+    // If backup is older than the restore retention window, show the same
+    // restore-eligibility message in preview flows (compare modals, etc).
+    // Note: only possible when productId is present (preview calls send it).
+    if (Number.isFinite(productId)) {
+      const optimizedAt =
+        imageStatus?.optimized_at ||
+        imageOptimization?.updated_at ||
+        imageOldData?.updated_at ||
+        null;
+
+      if (optimizedAt) {
+        const ageMs = Date.now() - new Date(optimizedAt).getTime();
+        if (ageMs > RESTORE_BACKUP_MS) {
+          const optimizedOn = new Date(optimizedAt).toISOString().slice(0, 10);
+          return reply.status(400).send({
+            success: false,
+            message: `Preview is not available. Image was optimized on ${optimizedOn}, which is more than ${RESTORE_BACKUP_DAYS} days ago.`,
+            data: {
+              image_id: Number(imageId),
+              product_id: Number(productId),
+              optimized_at: optimizedAt,
+              backup_retention_days: RESTORE_BACKUP_DAYS,
+            },
+          });
+        }
+      }
     }
 
     const originalPath =
