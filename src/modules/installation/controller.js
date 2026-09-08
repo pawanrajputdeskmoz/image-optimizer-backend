@@ -19,6 +19,9 @@ const {
   queueInstallNotificationEmail,
 } = require("../../utils/mail/sendInstallNotificationEmail");
 const {
+  queueUninstallNotificationEmail,
+} = require("../../utils/mail/sendUninstallNotificationEmail");
+const {
   queueAddToIntercom,
   getIntercomIdentity,
 } = require("../../utils/intercom/addToIntercom");
@@ -235,14 +238,29 @@ exports.uninstallApp = async (req, reply) => {
       console.error("[uninstall] paypal cancel:", cancelErr.message);
     }
 
+    const storeUser = await User.findOne({ store_hash: storeHash }).lean();
+    const uninstalledAt = new Date();
+
     await User.findOneAndUpdate(
       { store_hash: storeHash },
       {
         installStatus: "uninstalled",
-        lastUninstalledAt: new Date(),
+        lastUninstalledAt: uninstalledAt,
         access_token: null,
       }
     );
+
+    queueUninstallNotificationEmail({
+      storeName: storeUser?.store_name || null,
+      storeHash,
+      storeUrl: storeUser?.storeUrl || null,
+      domain: storeUser?.primaryDomain || null,
+      clientEmail: storeUser?.email || null,
+      clientName: storeUser?.username || null,
+      currency: storeUser?.currency || null,
+      storeId: storeUser?.store_id ?? null,
+      uninstalledAt,
+    });
 
     queueUninstallFromIntercom(storeHash);
 
