@@ -150,27 +150,52 @@ async function loadStoreContext(shopUrl) {
   };
 }
 
+/**
+ * Intercom People Data attribute names — must match workspace keys exactly
+ * (casing/spacing) as shown in the Intercom Details panel.
+ */
 function buildCustomAttributes(shopUrl, ctx, overrides = {}) {
+  const storeUrl = ctx.storeInfo.storeUrl || "";
+  const storeDomain =
+    ctx.storeInfo.primaryDomain ||
+    (typeof storeUrl === "string"
+      ? storeUrl.replace(/^https?:\/\//i, "").replace(/\/$/, "")
+      : "");
+
+  const appUrl = process.env.BIG_COMMERCE_APP_ID
+    ? `https://store-${shopUrl}.mybigcommerce.com/manage/app/${process.env.BIG_COMMERCE_APP_ID}`
+    : "";
+
   return {
-    "store hash": shopUrl,
-    email: ctx.email,
-    "uninstall/install status":
+    // Image 1 attributes
+    "Store hash": shopUrl,
+    "Uninstall/install status":
       overrides.installStatus ?? ctx.installStatus,
-    Platform: ctx.platform,
+    "Review url": overrides.reviewUrl ?? "",
     "Store owner name": ctx.ownerName,
-    "App url": process.env.BIG_COMMERCE_APP_ID
-      ? `https://store-${shopUrl}.mybigcommerce.com/manage/app/${process.env.BIG_COMMERCE_APP_ID}`
-      : "",
-    "Store status": overrides.storeStatus ?? ctx.storeStatus,
-    "Store name": ctx.storeInfo.store_name || "",
-    "Store URL": ctx.storeInfo.storeUrl || "",
-    "Managed Services": "No",
+    "Keyword limit": overrides.keywordLimit ?? "",
+    Platform: ctx.platform,
+    Shopurl: storeUrl,
     "Payment status": ctx.paymentStatus,
-    "Paid User": ctx.isPaid ? "Yes" : "No",
+    "Uninstallation date": overrides.uninstallationDate ?? "",
+    "Managed services": overrides.managedServices ?? "No",
+    "Paid user": ctx.isPaid ? "Yes" : "No",
     Plan: ctx.isPaid ? `US$ ${ctx.planPrice}` : "US$ 0",
+    "Store status": overrides.storeStatus ?? ctx.storeStatus,
+
+    // Image 2 attributes
+    "Slack email": overrides.slackEmail ?? "",
+    Email: ctx.email,
+    "Report frequency": overrides.reportFrequency ?? "",
+    "Ga connect": overrides.gaConnect ?? "",
+    "Use keyword": overrides.useKeyword ?? "",
+    "App url": appUrl,
+    Workflowinstanceid: overrides.workflowInstanceId ?? "",
+    Product: overrides.product ?? "Image Optimizer",
+    "Store name": ctx.storeInfo.store_name || "",
+    "Store domain": storeDomain,
     "Plan name": ctx.planSlug,
-    "user_hash - imageOptimizer": ctx.userHash || "",
-    "App Name": "Image Optimizer",
+
     ...overrides.extraAttributes,
   };
 }

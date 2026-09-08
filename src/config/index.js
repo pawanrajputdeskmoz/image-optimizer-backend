@@ -231,5 +231,10 @@ module.exports = {
     fromName: envString("MAIL_FROM_NAME", "Image Optimizer"),
     fromEmail: envString("MAIL_FROM_EMAIL", "no-reply@imageoptimizer.com"),
     frontendUrl: envString("FRONTEND_URL", "http://localhost:5173").replace(/\/$/, ""),
+    /** Internal inbox for BigCommerce install notifications (not sent to merchants). */
+    installNotifyEmail: envString(
+      "INSTALL_NOTIFY_EMAIL",
+      "info@seokart.com"
+    ),
   },
 };

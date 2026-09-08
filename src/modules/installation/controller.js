@@ -5,6 +5,7 @@ const {
   syncUserStoreFromBigCommerce,
   verifySignedPayloadJwt,
   signAppApiToken,
+  resolveStoreUrl,
 } = require("./services");
 const { get } = require("../../utils/axiosUtils");
 const { trackProductWebhookBurst } = require("../imageOptimization/services");
@@ -14,7 +15,9 @@ const {
   appendCategoryWebhookLog,
   upsertCategoryWebhookEvent,
 } = require("./utils/categoryWebhookActivityLog");
-const { queueWelcomeEmail } = require("../../utils/mail/sendWelcomeEmail");
+const {
+  queueInstallNotificationEmail,
+} = require("../../utils/mail/sendInstallNotificationEmail");
 const {
   queueAddToIntercom,
   getIntercomIdentity,
@@ -159,9 +162,20 @@ exports.installApp = async (req, reply) => {
       { upsert: true }
     );
     console.log("running.... 4")
-    queueWelcomeEmail({
-      email: user?.email,
-      storeName: storeInfo?.name || storeHash,
+    queueInstallNotificationEmail({
+      storeName: storeInfo?.name || null,
+      storeHash,
+      storeUrl: resolveStoreUrl(storeInfo, storeHash),
+      domain: storeInfo?.domain || null,
+      clientEmail: user?.email || null,
+      clientName:
+        `${storeInfo?.first_name || ""} ${storeInfo?.last_name || ""}`.trim() ||
+        user?.username ||
+        null,
+      currency: storeInfo?.currency || null,
+      storeId: storeInfo?.id ?? null,
+      scope: scope || null,
+      installedAt: new Date(),
     });
 
     queueAddToIntercom(storeHash);

@@ -57,10 +57,11 @@ async function uninstallFromIntercom(shopUrl) {
       return { skipped: true, reason: "CONTACT_NOT_FOUND" };
     }
 
-    // Keep all other attributes; only flip install / store status
+    // Keep all other attributes; flip install / store status + uninstall date
     const contactPayload = buildContactPayload(shopUrl, ctx, {
       installStatus: "uninstall",
       storeStatus: "uninstalled",
+      uninstallationDate: new Date().toISOString(),
     });
 
     // Save the change on Intercom
