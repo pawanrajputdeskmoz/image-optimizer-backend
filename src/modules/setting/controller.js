@@ -12,6 +12,7 @@ const {
   upgradeClientPlan,
   getClientMonthlyUsageHistory,
 } = require("./services");
+const { queueUpdateToIntercom } = require("../../utils/intercom/updateToIntercom");
 
 exports.getChannels = async (req, reply) => {
   const { storeHash, accessToken } = req;
@@ -354,6 +355,18 @@ exports.getClientDashboardStatsHandler = async (req, reply) => {
         success: false,
         message: error,
       });
+    }
+
+    // Sync Intercom whenever the merchant opens the dashboard (initial load only).
+    // Fire-and-forget — does not slow down stats response.
+    const syncIntercom =
+      req.query?.sync_intercom === "1" ||
+      req.query?.sync_intercom === "true" ||
+      req.query?.syncIntercom === "1" ||
+      req.query?.syncIntercom === "true";
+
+    if (syncIntercom && storeHash) {
+      queueUpdateToIntercom(storeHash);
     }
 
     return reply.send({

@@ -190,6 +190,7 @@ exports.fetchAllProducts = async (req, reply) => {
     };
     const bcConfig = { timeout: config.api.bigCommerceTimeoutMs };
 
+    console.log("step 1");
     const [response, imageBaseUrl] = await Promise.all([
       fetchCatalogProducts(
         get,
@@ -205,6 +206,7 @@ exports.fetchAllProducts = async (req, reply) => {
         storeUrl
       ),
     ]);
+    console.log("response", response);
 
     const products = Array.isArray(response?.data)
       ? response.data

@@ -241,6 +241,15 @@ const dashboardStatCardSchema = {
 };
 
 const getClientDashboardStatsSchema = {
+  querystring: {
+    type: "object",
+    additionalProperties: true,
+    properties: {
+      // Set by dashboard initial load so Intercom sync runs once per visit
+      sync_intercom: { type: "string" },
+      syncIntercom: { type: "string" },
+    },
+  },
   response: {
     200: {
       type: "object",

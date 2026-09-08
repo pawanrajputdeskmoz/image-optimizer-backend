@@ -15,6 +15,14 @@ const {
   upsertCategoryWebhookEvent,
 } = require("./utils/categoryWebhookActivityLog");
 const { queueWelcomeEmail } = require("../../utils/mail/sendWelcomeEmail");
+const {
+  queueAddToIntercom,
+  getIntercomIdentity,
+} = require("../../utils/intercom/addToIntercom");
+const {
+  queueUninstallFromIntercom,
+} = require("../../utils/intercom/uninstallFromIntercom");
+const { logIntercom } = require("../../utils/intercom/helpers");
 const { User, StoreOptimizationSettings } = require("../../models");
 
 async function persistWebhookEvent(webhook, fields) {
@@ -156,6 +164,8 @@ exports.installApp = async (req, reply) => {
       storeName: storeInfo?.name || storeHash,
     });
 
+    queueAddToIntercom(storeHash);
+
     return reply.redirect(getManageAppRedirectUrl(storeHash));
   } catch (err) {
     console.error("[install] failed:", {
@@ -219,6 +229,8 @@ exports.uninstallApp = async (req, reply) => {
         access_token: null,
       }
     );
+
+    queueUninstallFromIntercom(storeHash);
 
     return reply.status(200).send("OK");
   } catch (err) {
@@ -292,6 +304,19 @@ exports.loadBigComApp = async (req, reply) => {
     }
 
     const api_token = signAppApiToken(storeHash, userInfo.access_token);
+    const mongoUserId = String(syncedUser._id);
+    const { userId, userHash, identityError } = getIntercomIdentity(
+      mongoUserId,
+      { storeHash, step: "load-application" }
+    );
+
+    if (!userHash) {
+      logIntercom("[install] Intercom user_hash missing on load-application", {
+        storeHash,
+        userId: mongoUserId,
+        identityError: identityError || "UNKNOWN",
+      });
+    }
 
     return reply.status(200).send({
       success: true,
@@ -302,6 +327,9 @@ exports.loadBigComApp = async (req, reply) => {
         store_name: syncedUser.store_name || null,
         currency: syncedUser.currency || null,
         primaryDomain: syncedUser.primaryDomain || null,
+        email: syncedUser.email || null,
+        user_id: userId,
+        user_hash: userHash,
         user,
         owner,
       },
