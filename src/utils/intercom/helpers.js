@@ -166,47 +166,29 @@ async function loadStoreContext(shopUrl) {
  * (casing/spacing) as shown in the Intercom Details panel.
  */
 function buildCustomAttributes(shopUrl, ctx, overrides = {}) {
-  const storeUrl = ctx.storeInfo.storeUrl || "";
-  const storeDomain =
-    ctx.storeInfo.primaryDomain ||
-    (typeof storeUrl === "string"
-      ? storeUrl.replace(/^https?:\/\//i, "").replace(/\/$/, "")
-      : "");
-
   const appUrl = process.env.BIG_COMMERCE_APP_ID
     ? `https://store-${shopUrl}.mybigcommerce.com/manage/app/${process.env.BIG_COMMERCE_APP_ID}`
     : "";
 
   return {
-    // Image 1 attributes
-    "Store hash": shopUrl,
-    "Uninstall/install status":
+    // Exact Intercom attribute names (must match PHP / workspace keys)
+    "store hash": shopUrl,
+    email: ctx.email,
+    "uninstall/install status":
       overrides.installStatus ?? ctx.installStatus,
-    "Review url": overrides.reviewUrl ?? "",
-    "Store owner name": ctx.ownerName,
-    "Keyword limit": overrides.keywordLimit ?? "",
+    "Report Frequency": overrides.reportFrequency ?? "",
+    "review url": overrides.reviewUrl ?? "",
     Platform: ctx.platform,
-    Shopurl: storeUrl,
-    "Payment status": ctx.paymentStatus,
-    "Uninstallation date": overrides.uninstallationDate ?? "",
-    "Managed services": overrides.managedServices ?? "No",
-    "Paid user": ctx.isPaid ? "Yes" : "No",
-    Plan: ctx.isPaid ? `US$ ${ctx.planPrice}` : "US$ 0",
-    "Store status": overrides.storeStatus ?? ctx.storeStatus,
-
-    // Image 2 attributes
-    "Slack email": overrides.slackEmail ?? "",
-    Email: ctx.email,
-    "Report frequency": overrides.reportFrequency ?? "",
-    "Ga connect": overrides.gaConnect ?? "",
-    "Use keyword": overrides.useKeyword ?? "",
+    "Keyword Limit": overrides.keywordLimit ?? "",
+    "Store owner name": ctx.ownerName,
     "App url": appUrl,
-    Workflowinstanceid: overrides.workflowInstanceId ?? "",
-    Product: overrides.product ?? "Image Optimizer",
-    "Store name": ctx.storeInfo.store_name || "",
-    "Store domain": storeDomain,
-    "Plan name": ctx.planSlug,
-    "App name": "image optimizer",
+    "GA connect": overrides.gaConnect ?? "",
+    "Store status": overrides.storeStatus ?? ctx.storeStatus,
+    "Managed Services": overrides.managedServices ?? "No",
+    "Payment status": ctx.paymentStatus,
+    "Paid User": ctx.isPaid ? "Yes" : "No",
+    Plan: ctx.isPaid ? `US$ ${ctx.planPrice}` : "US$ 0",
+    "use keyword": overrides.useKeyword ?? "",
 
     ...overrides.extraAttributes,
   };
