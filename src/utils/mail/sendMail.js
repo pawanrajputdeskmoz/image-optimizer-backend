@@ -53,10 +53,11 @@ async function sendMail({ to, subject, html, text } = {}) {
   }
 
   const from = `"${config.mail.fromName}" <${config.mail.fromEmail}>`;
+  const info = await tx.sendMail({ from, to, subject, html, text });
   console.log("[sendMail] sent", { to, subject, messageId: info.messageId });
 
   try {
-    const info = await tx.sendMail({ from, to, subject, html, text });
+ 
     console.log("[sendMail] sent", { to, subject, messageId: info.messageId });
     return { sent: true, messageId: info.messageId };
   } catch (err) {
