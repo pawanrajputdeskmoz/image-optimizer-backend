@@ -28,7 +28,10 @@ const {
 const {
   queueUninstallFromIntercom,
 } = require("../../utils/intercom/uninstallFromIntercom");
-const { logIntercom } = require("../../utils/intercom/helpers");
+const {
+  logIntercom,
+  buildContactExternalId,
+} = require("../../utils/intercom/helpers");
 const { User, StoreOptimizationSettings } = require("../../models");
 
 async function persistWebhookEvent(webhook, fields) {
@@ -336,16 +339,16 @@ exports.loadBigComApp = async (req, reply) => {
     }
 
     const api_token = signAppApiToken(storeHash, userInfo.access_token);
-    const mongoUserId = String(syncedUser._id);
+    const intercomUserId = buildContactExternalId(storeHash);
     const { userId, userHash, identityError } = getIntercomIdentity(
-      mongoUserId,
+      intercomUserId,
       { storeHash, step: "load-application" }
     );
 
     if (!userHash) {
       logIntercom("[install] Intercom user_hash missing on load-application", {
         storeHash,
-        userId: mongoUserId,
+        userId: intercomUserId,
         identityError: identityError || "UNKNOWN",
       });
     }

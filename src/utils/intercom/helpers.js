@@ -4,7 +4,8 @@ const { User, ClientPlan, Plan } = require("../../models");
 const { appendDailyLog } = require("../fileLogger");
 
 const INTERCOM_API_BASE = "https://api.intercom.io";
-const INTERCOM_APP_LABEL = "imageOptimizer";
+/** Prefix for Intercom user_id / external_id → `io_{storeHash}` */
+const INTERCOM_USER_ID_PREFIX = "io";
 
 /**
  * Write every Intercom message to logs/ (daily + intercom-YYYY-MM-DD.log).
@@ -51,8 +52,15 @@ function getIntercomHeaders() {
   };
 }
 
-function buildContactExternalId(userId) {
-  return `${String(userId).trim()} - ${INTERCOM_APP_LABEL}`;
+/**
+ * Intercom user_id / external_id: `io_{storeHash}`.
+ * @param {string} storeHash
+ */
+function buildContactExternalId(storeHash) {
+  const hash = String(storeHash ?? "").trim();
+  if (!hash) return "";
+  if (hash.startsWith(`${INTERCOM_USER_ID_PREFIX}_`)) return hash;
+  return `${INTERCOM_USER_ID_PREFIX}_${hash}`;
 }
 
 /**
@@ -121,6 +129,7 @@ async function loadStoreContext(shopUrl) {
   }
 
   const mongoUserId = String(storeInfo._id);
+  const contactExternalId = buildContactExternalId(shopUrl);
   const clientPlan = await ClientPlan.findOne({ store_hash: shopUrl }).lean();
   const planSlug = (clientPlan?.base_plan_slug || "free").toLowerCase();
   const plan = await Plan.findOne({ slug: planSlug }).lean();
@@ -130,12 +139,13 @@ async function loadStoreContext(shopUrl) {
     planPrice > 0 &&
     (paymentStatus === "active" || (!paymentStatus && planPrice > 0));
 
-  const { userHash } = getIntercomIdentity(mongoUserId);
+  // HMAC must use the same string as Intercom user_id / external_id
+  const { userHash } = getIntercomIdentity(contactExternalId);
 
   return {
     storeInfo,
     mongoUserId,
-    contactExternalId: buildContactExternalId(mongoUserId),
+    contactExternalId,
     email: storeInfo.email || "",
     ownerName: storeInfo.username || "",
     platform: storeInfo.provider || "bigcommerce",
@@ -195,6 +205,7 @@ function buildCustomAttributes(shopUrl, ctx, overrides = {}) {
     "Store name": ctx.storeInfo.store_name || "",
     "Store domain": storeDomain,
     "Plan name": ctx.planSlug,
+     "App name": "image optimizer",
 
     ...overrides.extraAttributes,
   };
@@ -226,7 +237,7 @@ async function findContactByExternalId(contactExternalId, headers) {
 
 module.exports = {
   INTERCOM_API_BASE,
-  INTERCOM_APP_LABEL,
+  INTERCOM_USER_ID_PREFIX,
   logIntercom,
   getIntercomHeaders,
   getIntercomIdentity,

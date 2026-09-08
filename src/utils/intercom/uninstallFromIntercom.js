@@ -41,7 +41,7 @@ async function uninstallFromIntercom(shopUrl) {
     // Pull store + plan info we already store locally
     const ctx = await loadStoreContext(shopUrl);
 
-    // Look up the contact we created on install (external_id = "{userId} - imageOptimizer")
+    // Look up the contact we created on install (external_id = "io_{storeHash}")
     const existingContact = await findContactByExternalId(
       ctx.contactExternalId,
       headers
