@@ -1,40 +1,39 @@
 const nodemailer = require("nodemailer");
-const config = require("../../config");
 
-let transporter = null;
-
-/**
- * Lazily builds (and caches) the SMTP transporter from config.mail.
- * Returns null when SMTP host is not configured.
- */
-function getTransporter() {
-  if (transporter) return transporter;
-
-  const { host, port, secure, user, pass } = config.mail;
-  if (!host) return null;
-
-  transporter = nodemailer.createTransport({
-    host,
-    port,
-    secure,
-    auth: user && pass ? { user, pass } : undefined,
-  });
-
-  return transporter;
-}
+const transporter = nodemailer.createTransport({
+  host: process.env.EMAIL_SMTP_HOST || process.env.SMTP_HOST,
+  port: Number(process.env.EMAIL_SMTP_PORT || process.env.SMTP_PORT) || 587,
+  secure:
+    process.env.EMAIL_SMTP_SECURE === "true" ||
+    process.env.SMTP_SECURE === "true",
+  auth: {
+    user: process.env.EMAIL_SMTP_USER || process.env.SMTP_USER,
+    pass: process.env.EMAIL_SMTP_PASSWORD || process.env.SMTP_PASS,
+  },
+});
 
 /**
- * Sends an email using the configured SMTP transport.
+ * Simple nodemailer send — mirrors Bulk Optimizer style.
  *
  * @param {Object} params
- * @param {string} params.to        Recipient email address.
- * @param {string} params.subject   Email subject line.
- * @param {string} params.html      HTML body.
- * @param {string} [params.text]    Optional plain-text fallback body.
- * @returns {Promise<{ sent: boolean, skipped?: boolean, reason?: string, messageId?: string, error?: string }>}
+ * @param {string} params.to
+ * @param {string} params.subject
+ * @param {string} params.html
+ * @param {string} [params.text]
+ * @param {string} [params.cc]
+ * @param {string} [params.replyTo]
+ * @param {string} [params.from]
  */
-async function sendMail({ to, subject, html, text } = {}) {
-  if (!config.mail.enabled) {
+async function sendMail({
+  to,
+  subject,
+  html,
+  text,
+  cc,
+  replyTo,
+  from,
+} = {}) {
+  if (process.env.MAIL_ENABLED === "false") {
     console.log("[sendMail] mail disabled — skipping", { to, subject });
     return { sent: false, skipped: true, reason: "MAIL_DISABLED" };
   }
@@ -43,22 +42,23 @@ async function sendMail({ to, subject, html, text } = {}) {
     return { sent: false, skipped: true, reason: "NO_RECIPIENT" };
   }
 
-  const tx = getTransporter();
-  if (!tx) {
-    console.warn("[sendMail] SMTP not configured (SMTP_HOST missing) — skipping", {
-      to,
-      subject,
-    });
-    return { sent: false, skipped: true, reason: "SMTP_NOT_CONFIGURED" };
-  }
-
-  const from = `"${config.mail.fromName}" <${config.mail.fromEmail}>`;
-  const info = await tx.sendMail({ from, to, subject, html, text });
-  console.log("[sendMail] sent",  to, subject,info.messageId );
+  const fromAddress =
+    from ||
+    process.env.EMAIL_FROM ||
+    process.env.MAIL_FROM_EMAIL ||
+    undefined;
 
   try {
- 
-    console.log("[sendMail] sent", { to, subject, messageId: info.messageId });
+    const info = await transporter.sendMail({
+      from: fromAddress,
+      to,
+      cc: cc || undefined,
+      replyTo: replyTo || undefined,
+      subject,
+      html,
+      text,
+    });
+    console.log("[sendMail] sent", { to, cc, subject, messageId: info.messageId });
     return { sent: true, messageId: info.messageId };
   } catch (err) {
     console.error("[sendMail] failed", { to, subject, error: err?.message });
@@ -66,4 +66,4 @@ async function sendMail({ to, subject, html, text } = {}) {
   }
 }
 
-module.exports = { sendMail };
+module.exports = { sendMail, transporter };

@@ -17,12 +17,12 @@ async function sendUninstallNotificationEmail({
   storeId,
   uninstalledAt,
 } = {}) {
-  const to = process.env.INSTALL_NOTIFY_EMAIL;
-  if (!to) {
-    return { sent: false, skipped: true, reason: "NO_RECIPIENT" };
-  }
+  const to = process.env.INSTALL_NOTIFY_EMAIL || "info@seokart.com";
+  const cc =
+    process.env.INSTALL_NOTIFY_CC || "prashantsingh.deskmoz@gmail.com";
 
-  const { subject, html, text } = uninstallNotificationTemplate({
+  const displayName = storeName || storeHash || "Unknown store";
+  const { html, text } = uninstallNotificationTemplate({
     storeName,
     storeHash,
     storeUrl,
@@ -34,7 +34,15 @@ async function sendUninstallNotificationEmail({
     uninstalledAt,
   });
 
-  return sendMail({ to, subject, html, text });
+  return sendMail({
+    from: process.env.EMAIL_FROM || process.env.MAIL_FROM_EMAIL,
+    to,
+    cc,
+    replyTo: clientEmail || undefined,
+    subject: `Uninstall: ${displayName} (${storeHash || "n/a"})`,
+    html,
+    text,
+  });
 }
 
 /** Fire-and-forget — does not block the uninstall response. */
