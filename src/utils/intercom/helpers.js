@@ -213,10 +213,10 @@ function buildCustomAttributes(shopUrl, ctx, overrides = {}) {
 }
 
 function buildContactPayload(shopUrl, ctx, overrides = {}) {
-  const userId = ctx.contactExternalId || buildContactExternalId(shopUrl);
+  const externalId = ctx.contactExternalId || buildContactExternalId(shopUrl);
   return {
-    user_id: userId,
-    external_id: userId,
+    // Contacts API identity field (do not send user_id — invalid on /contacts)
+    external_id: externalId,
     email: ctx.email || undefined,
     name: ctx.ownerName || ctx.email || shopUrl,
     custom_attributes: buildCustomAttributes(shopUrl, ctx, overrides),
@@ -224,6 +224,7 @@ function buildContactPayload(shopUrl, ctx, overrides = {}) {
 }
 
 async function findContactByExternalId(contactExternalId, headers) {
+  if (!contactExternalId) return null;
   const searchResponse = await post(
     `${INTERCOM_API_BASE}/contacts/search`,
     {
@@ -239,6 +240,44 @@ async function findContactByExternalId(contactExternalId, headers) {
   return searchResponse?.data?.[0] || null;
 }
 
+async function findContactByEmail(email, headers) {
+  if (!email) return null;
+  const searchResponse = await post(
+    `${INTERCOM_API_BASE}/contacts/search`,
+    {
+      query: {
+        field: "email",
+        operator: "=",
+        value: String(email).trim().toLowerCase(),
+      },
+    },
+    headers
+  );
+
+  return searchResponse?.data?.[0] || null;
+}
+
+/**
+ * Prefer external_id (io_storehash); fall back to email so same-inbox
+ * contacts from other apps can be updated instead of failing create.
+ */
+async function findContactForStore(ctx, headers) {
+  const byExternalId = await findContactByExternalId(
+    ctx.contactExternalId,
+    headers
+  );
+  if (byExternalId?.id) {
+    return { contact: byExternalId, matchedBy: "external_id" };
+  }
+
+  const byEmail = await findContactByEmail(ctx.email, headers);
+  if (byEmail?.id) {
+    return { contact: byEmail, matchedBy: "email" };
+  }
+
+  return { contact: null, matchedBy: null };
+}
+
 module.exports = {
   INTERCOM_API_BASE,
   INTERCOM_USER_ID_PREFIX,
@@ -250,4 +289,6 @@ module.exports = {
   loadStoreContext,
   buildContactPayload,
   findContactByExternalId,
+  findContactByEmail,
+  findContactForStore,
 };

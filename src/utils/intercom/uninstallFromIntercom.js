@@ -12,17 +12,11 @@ const {
   getIntercomHeaders,
   loadStoreContext,
   buildContactPayload,
-  findContactByExternalId,
+  findContactForStore,
 } = require("./helpers");
 
 /**
  * Mark this store as uninstalled in Intercom.
- *
- * Steps:
- * 1. Check we have an Intercom API token
- * 2. Load store details from our database
- * 3. Find the matching Intercom contact
- * 4. Update install status fields to "uninstall" / "uninstalled"
  *
  * @param {string} shopUrl - BigCommerce store hash
  */
@@ -30,7 +24,6 @@ async function uninstallFromIntercom(shopUrl) {
   const { logCallFunction } = require("../fileLogger");
   logCallFunction("uninstallFromIntercom", { storeHash: shopUrl });
   try {
-    // Need INTERCOM_ACCESS_TOKEN in .env to talk to Intercom
     const headers = getIntercomHeaders();
     if (!headers) {
       logIntercom(
@@ -40,16 +33,12 @@ async function uninstallFromIntercom(shopUrl) {
       return { skipped: true, reason: "MISSING_TOKEN" };
     }
 
-    // Pull store + plan info we already store locally
     const ctx = await loadStoreContext(shopUrl);
-
-    // Look up the contact we created on install (external_id = "io_{storeHash}")
-    const existingContact = await findContactByExternalId(
-      ctx.contactExternalId,
+    const { contact: existingContact, matchedBy } = await findContactForStore(
+      ctx,
       headers
     );
 
-    // Nothing to update if they were never synced to Intercom
     if (!existingContact?.id) {
       logIntercom("[intercom] Contact not found for uninstall", {
         storeHash: shopUrl,
@@ -59,14 +48,12 @@ async function uninstallFromIntercom(shopUrl) {
       return { skipped: true, reason: "CONTACT_NOT_FOUND" };
     }
 
-    // Keep all other attributes; flip install / store status + uninstall date
     const contactPayload = buildContactPayload(shopUrl, ctx, {
       installStatus: "uninstall",
       storeStatus: "uninstalled",
       uninstallationDate: new Date().toISOString(),
     });
 
-    // Save the change on Intercom
     await put(
       `${INTERCOM_API_BASE}/contacts/${existingContact.id}`,
       contactPayload,
@@ -77,6 +64,7 @@ async function uninstallFromIntercom(shopUrl) {
       storeHash: shopUrl,
       contactExternalId: ctx.contactExternalId,
       contactId: existingContact.id,
+      matchedBy,
     });
     return true;
   } catch (err) {
@@ -92,8 +80,6 @@ async function uninstallFromIntercom(shopUrl) {
 
 /**
  * Same as uninstallFromIntercom, but runs in the background.
- * Use this from the uninstall route so the merchant gets a fast "OK"
- * and Intercom sync happens afterward.
  */
 function queueUninstallFromIntercom(shopUrl) {
   void uninstallFromIntercom(shopUrl).catch((err) => {

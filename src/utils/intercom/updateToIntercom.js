@@ -12,16 +12,11 @@ const {
   getIntercomHeaders,
   loadStoreContext,
   buildContactPayload,
-  findContactByExternalId,
+  findContactForStore,
 } = require("./helpers");
 
 /**
  * Find the Intercom contact for this store and refresh its details.
- *
- * Steps:
- * 1. Load the store, plan, and user hash
- * 2. Find the contact by external_id
- * 3. PUT the latest custom attributes (exact Intercom attribute names)
  *
  * @param {string} shopUrl - BigCommerce store hash
  */
@@ -43,9 +38,8 @@ async function updateToIntercom(shopUrl) {
     }
 
     const ctx = await loadStoreContext(shopUrl);
-
-    const existingContact = await findContactByExternalId(
-      ctx.contactExternalId,
+    const { contact: existingContact, matchedBy } = await findContactForStore(
+      ctx,
       headers
     );
 
@@ -77,6 +71,7 @@ async function updateToIntercom(shopUrl) {
       storeHash: shopUrl,
       contactExternalId: ctx.contactExternalId,
       contactId: existingContact.id,
+      matchedBy,
     });
     return true;
   } catch (err) {

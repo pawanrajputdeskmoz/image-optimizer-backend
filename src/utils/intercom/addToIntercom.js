@@ -6,7 +6,7 @@ const {
   getIntercomIdentity,
   loadStoreContext,
   buildContactPayload,
-  findContactByExternalId,
+  findContactForStore,
 } = require("./helpers");
 
 /**
@@ -31,8 +31,8 @@ async function addToIntercom(shopUrl) {
       storeStatus: "installed",
     });
 
-    const existingContact = await findContactByExternalId(
-      ctx.contactExternalId,
+    const { contact: existingContact, matchedBy } = await findContactForStore(
+      ctx,
       headers
     );
 
@@ -46,20 +46,41 @@ async function addToIntercom(shopUrl) {
         storeHash: shopUrl,
         contactExternalId: ctx.contactExternalId,
         contactId: existingContact.id,
+        matchedBy,
       });
     } else {
-      await post(
-        `${INTERCOM_API_BASE}/contacts`,
-        {
-          role: "user",
-          ...contactPayload,
-        },
-        headers
-      );
-      logIntercom("[intercom] Contact created", {
-        storeHash: shopUrl,
-        contactExternalId: ctx.contactExternalId,
-      });
+      try {
+        await post(
+          `${INTERCOM_API_BASE}/contacts`,
+          {
+            role: "user",
+            ...contactPayload,
+          },
+          headers
+        );
+        logIntercom("[intercom] Contact created", {
+          storeHash: shopUrl,
+          contactExternalId: ctx.contactExternalId,
+        });
+      } catch (createErr) {
+        // Same email already exists (other app) — update that contact instead
+        const byEmail = await findContactForStore(ctx, headers);
+        if (byEmail.contact?.id) {
+          await put(
+            `${INTERCOM_API_BASE}/contacts/${byEmail.contact.id}`,
+            contactPayload,
+            { headers }
+          );
+          logIntercom("[intercom] Contact updated after create conflict", {
+            storeHash: shopUrl,
+            contactExternalId: ctx.contactExternalId,
+            contactId: byEmail.contact.id,
+            matchedBy: byEmail.matchedBy,
+          });
+        } else {
+          throw createErr;
+        }
+      }
     }
 
     return true;
