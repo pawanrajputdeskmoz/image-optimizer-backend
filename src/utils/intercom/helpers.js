@@ -179,6 +179,7 @@ function buildCustomAttributes(shopUrl, ctx, overrides = {}) {
 
   return {
     // Image 1 attributes
+    "User id": ctx.contactExternalId || buildContactExternalId(shopUrl),
     "Store hash": shopUrl,
     "Uninstall/install status":
       overrides.installStatus ?? ctx.installStatus,
@@ -206,7 +207,7 @@ function buildCustomAttributes(shopUrl, ctx, overrides = {}) {
     "Store name": ctx.storeInfo.store_name || "",
     "Store domain": storeDomain,
     "Plan name": ctx.planSlug,
-     "App name": "image optimizer",
+    "App name": "image optimizer",
 
     ...overrides.extraAttributes,
   };
