@@ -48,18 +48,24 @@ function writeLine(line, { category = null } = {}) {
 }
 
 /**
- * Append a simple line (legacy helper).
- * Format: [YYYY-MM-DD HH:mm:ss] message {meta}
+ * Append a tabular log block with a blank line before it
+ * so consecutive entries (and old vs new logs) stay easy to scan.
  */
 function appendDailyLog(message, { category = null, meta = null } = {}) {
-  const time = formatDateTime();
-  const metaText =
-    meta && typeof meta === "object"
-      ? ` ${safeJson(meta)}`
+  const fields =
+    meta && typeof meta === "object" && !Array.isArray(meta)
+      ? meta
       : meta != null
-        ? ` ${String(meta)}`
-        : "";
-  writeLine(`[${time}] ${message}${metaText}`, { category });
+        ? { meta }
+        : {};
+  const block = formatLogTable({
+    time: formatDateTime(),
+    title: message,
+    category,
+    fields,
+  });
+  writeLine(block, { category });
+  return block;
 }
 
 const SENSITIVE_KEYS = new Set([
@@ -107,6 +113,89 @@ function safeJson(value, maxLen = 4000) {
   }
 }
 
+const LOG_SEP = "-".repeat(88);
+const VALUE_MAX_LEN = 4000;
+/** Fixed key column so every log table lines up the same way. */
+const KEY_COL_WIDTH = 20;
+
+function visibleFields(fields = {}) {
+  const out = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === undefined) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+function computeKeyWidth(headerRows, fields) {
+  let max = KEY_COL_WIDTH;
+  for (const [key] of headerRows) {
+    max = Math.max(max, String(key).length);
+  }
+  for (const key of Object.keys(fields)) {
+    max = Math.max(max, String(key).length);
+  }
+  return max;
+}
+
+function formatCellValue(value, valueIndent) {
+  if (value === null) return "null";
+  if (typeof value !== "object") return String(value);
+  try {
+    let json = JSON.stringify(sanitize(value), null, 2);
+    if (json.length > VALUE_MAX_LEN) {
+      json = `${json.slice(0, VALUE_MAX_LEN)}\n…[truncated]`;
+    }
+    const pad = " ".repeat(valueIndent);
+    return json
+      .split("\n")
+      .map((line, i) => (i === 0 ? line : `${pad}${line}`))
+      .join("\n");
+  } catch {
+    return String(value);
+  }
+}
+
+function formatRow(key, value, keyWidth) {
+  const label = String(key).padEnd(keyWidth, " ");
+  return `${label} ${formatCellValue(value, keyWidth + 1)}`;
+}
+
+/**
+ * Two-column table: header (TIME / SCOPE / EVENT) then field rows.
+ * Leading blank line keeps old and new entries visually separated.
+ */
+function formatLogTable({
+  time,
+  title,
+  category = null,
+  requestId = null,
+  fields = {},
+} = {}) {
+  const body = visibleFields(fields);
+  const headerRows = [
+    ["TIME", time],
+    ["SCOPE", category || "-"],
+    ["EVENT", title],
+  ];
+  if (requestId) headerRows.push(["REQUEST ID", requestId]);
+
+  const keyWidth = computeKeyWidth(headerRows, body);
+  const lines = [""];
+  lines.push(LOG_SEP);
+  for (const [key, value] of headerRows) {
+    lines.push(formatRow(key, value, keyWidth));
+  }
+  if (Object.keys(body).length) {
+    lines.push(LOG_SEP);
+    for (const [key, value] of Object.entries(body)) {
+      lines.push(formatRow(key, value, keyWidth));
+    }
+  }
+  lines.push(LOG_SEP);
+  return lines.join("\n");
+}
+
 function getRequestContext() {
   return requestContext.getStore() || null;
 }
@@ -128,21 +217,15 @@ function newRequestId() {
 function logBlock(title, fields = {}, opts = {}) {
   const ctx = getRequestContext();
   const time = formatDateTime();
-  const reqId = ctx?.requestId ? ` req=${ctx.requestId}` : "";
-  const lines = [`[${time}]${reqId} ${title}`];
-
-  for (const [key, value] of Object.entries(fields)) {
-    if (value === undefined) continue;
-    if (value !== null && typeof value === "object") {
-      lines.push(`  ${key}: ${safeJson(value)}`);
-    } else {
-      lines.push(`  ${key}: ${value}`);
-    }
-  }
-
-  writeLine(lines.join("\n"), opts);
-  // Also mirror briefly to console for PM2
-  console.log(lines[0]);
+  const block = formatLogTable({
+    time,
+    title,
+    category: opts.category || null,
+    requestId: ctx?.requestId || null,
+    fields,
+  });
+  writeLine(block, opts);
+  console.log(`[${time}] ${title}`);
 }
 
 function logRequestStart(details = {}) {
@@ -166,6 +249,7 @@ module.exports = {
   appendDailyLog,
   dateStamp,
   formatDateTime,
+  formatLogTable,
   sanitize,
   safeJson,
   getRequestContext,

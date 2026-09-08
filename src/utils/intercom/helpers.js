@@ -12,10 +12,8 @@ const INTERCOM_USER_ID_PREFIX = "io";
  * Also mirrors to the console so you still see it in the terminal.
  */
 function logIntercom(message, meta = null) {
-  appendDailyLog(message, { category: "intercom", meta });
-  const metaText =
-    meta && typeof meta === "object" ? ` ${JSON.stringify(meta)}` : "";
-  console.log(`${message}${metaText}`);
+  const block = appendDailyLog(message, { category: "intercom", meta });
+  console.log(block);
 }
 
 function sanitizeSecret(value) {
@@ -148,6 +146,7 @@ async function loadStoreContext(shopUrl) {
     mongoUserId,
     contactExternalId,
     email: storeInfo.email || "",
+    storeName: storeInfo.store_name || "",
     ownerName: storeInfo.username || "",
     platform: storeInfo.provider || "bigcommerce",
     storeStatus: storeInfo.installStatus || "unknown",
@@ -181,6 +180,7 @@ function buildCustomAttributes(shopUrl, ctx, overrides = {}) {
     Platform: ctx.platform,
     "Keyword Limit": overrides.keywordLimit ?? "",
     "Store owner name": ctx.ownerName,
+    "App name": "Image Optimizer",
     "App url": appUrl,
     "GA connect": overrides.gaConnect ?? "",
     "Store status": overrides.storeStatus ?? ctx.storeStatus,
@@ -200,7 +200,7 @@ function buildContactPayload(shopUrl, ctx, overrides = {}) {
     // Contacts API identity field (do not send user_id — invalid on /contacts)
     external_id: externalId,
     email: ctx.email || undefined,
-    name: ctx.ownerName || ctx.email || shopUrl,
+    name: ctx.storeName || ctx.ownerName || shopUrl,
     custom_attributes: buildCustomAttributes(shopUrl, ctx, overrides),
   };
 }
