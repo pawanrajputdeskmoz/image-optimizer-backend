@@ -13,6 +13,8 @@ const {
  * Create (or refresh) an Intercom contact after app install.
  */
 async function addToIntercom(shopUrl) {
+  const { logCallFunction } = require("../fileLogger");
+  logCallFunction("addToIntercom", { storeHash: shopUrl });
   try {
     const headers = getIntercomHeaders();
     if (!headers) {

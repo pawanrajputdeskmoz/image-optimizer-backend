@@ -27,6 +27,8 @@ const {
  * @param {string} shopUrl - BigCommerce store hash
  */
 async function uninstallFromIntercom(shopUrl) {
+  const { logCallFunction } = require("../fileLogger");
+  logCallFunction("uninstallFromIntercom", { storeHash: shopUrl });
   try {
     // Need INTERCOM_ACCESS_TOKEN in .env to talk to Intercom
     const headers = getIntercomHeaders();

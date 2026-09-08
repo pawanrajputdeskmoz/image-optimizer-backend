@@ -2,6 +2,7 @@ const axios = require('axios');
 const http = require('http');
 const https = require('https');
 const config = require('../config');
+const { logCallApi, sanitize } = require('./fileLogger');
 
 // Reuse TCP/TLS connections across sequential BigCommerce calls (upload,
 // metadata update, delete, verify, etc. all hit the same host back-to-back)
@@ -18,10 +19,55 @@ const instance = axios.create({
   httpsAgent,
 });
 
-instance.interceptors.response.use(
-  (response) => response,
-  (error) => Promise.reject(error)
-);
+function summarizeData(data) {
+  if (data == null) return undefined;
+  if (typeof FormData !== 'undefined' && data instanceof FormData) {
+    return '[FormData]';
+  }
+  if (Buffer.isBuffer(data)) return `[Buffer ${data.length} bytes]`;
+  if (typeof data === 'string') {
+    return data.length > 500 ? `${data.slice(0, 500)}…` : data;
+  }
+  return sanitize(data);
+}
+
+function attachApiLogging(client) {
+  client.interceptors.request.use((reqConfig) => {
+    reqConfig.metadata = { startedAt: Date.now() };
+    return reqConfig;
+  });
+
+  client.interceptors.response.use(
+    (response) => {
+      const startedAt = response.config?.metadata?.startedAt || Date.now();
+      logCallApi({
+        method: (response.config?.method || 'get').toUpperCase(),
+        url: response.config?.url,
+        status: response.status,
+        durationMs: Date.now() - startedAt,
+        requestData: summarizeData(response.config?.data),
+        responseData: summarizeData(response.data),
+      });
+      return response;
+    },
+    (error) => {
+      const cfg = error?.config || {};
+      const startedAt = cfg.metadata?.startedAt || Date.now();
+      logCallApi({
+        method: (cfg.method || 'get').toUpperCase(),
+        url: cfg.url,
+        status: error?.response?.status || 'ERROR',
+        durationMs: Date.now() - startedAt,
+        requestData: summarizeData(cfg.data),
+        error: error?.message,
+        responseData: summarizeData(error?.response?.data),
+      });
+      return Promise.reject(error);
+    }
+  );
+}
+
+attachApiLogging(instance);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -102,18 +148,40 @@ async function post(url, data, headers = {}, config = {}) {
  * @returns {Promise<unknown>}
  */
 async function postFormData(url, form, headers = {}) {
-  const response = await axios.post(url, form, {
-    timeout: config.http.axiosTimeoutMs,
-    headers: {
-      Accept: 'application/json',
-      ...headers,
-    },
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity,
-    httpAgent,
-    httpsAgent,
-  });
-  return response.data;
+  const startedAt = Date.now();
+  try {
+    const response = await axios.post(url, form, {
+      timeout: config.http.axiosTimeoutMs,
+      headers: {
+        Accept: 'application/json',
+        ...headers,
+      },
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+      httpAgent,
+      httpsAgent,
+    });
+    logCallApi({
+      method: 'POST',
+      url,
+      status: response.status,
+      durationMs: Date.now() - startedAt,
+      requestData: '[FormData]',
+      responseData: summarizeData(response.data),
+    });
+    return response.data;
+  } catch (error) {
+    logCallApi({
+      method: 'POST',
+      url,
+      status: error?.response?.status || 'ERROR',
+      durationMs: Date.now() - startedAt,
+      requestData: '[FormData]',
+      error: error?.message,
+      responseData: summarizeData(error?.response?.data),
+    });
+    throw error;
+  }
 }
 
 /**

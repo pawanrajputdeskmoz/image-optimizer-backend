@@ -26,6 +26,8 @@ const {
  * @param {string} shopUrl - BigCommerce store hash
  */
 async function updateToIntercom(shopUrl) {
+  const { logCallFunction } = require("../fileLogger");
+  logCallFunction("updateToIntercom", { storeHash: shopUrl });
   try {
     if (!shopUrl) {
       throw new Error("store_hash is required");

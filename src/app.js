@@ -24,12 +24,14 @@ const {
   paymentRoutes,
 } = require("./modules");
 const { connectMongo } = require("./db/mongo");
+const { registerRequestLogger } = require("./middlewares/requestLogger");
 
 async function buildApp() {
 
   const app = createFastifyInstance();
   await connectMongo();
 
+  registerRequestLogger(app);
   registerValidationErrorHandler(app);
   registerCors(app);
   await app.register(multipartPlugin(), {

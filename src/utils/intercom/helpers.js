@@ -61,6 +61,7 @@ function buildContactExternalId(storeHash) {
   if (!hash) return "";
   if (hash.startsWith(`${INTERCOM_USER_ID_PREFIX}_`)) return hash;
   return `${INTERCOM_USER_ID_PREFIX}_${hash}`;
+  
 }
 
 /**
