@@ -7,7 +7,8 @@ const { getPlanBySlug } = require("../../modules/plans/service");
  * Fetches free-plan details in the background (one DB read).
  */
 async function sendWelcomeEmail({ email, storeName } = {}) {
-  if (!email) {
+  const to = process.env.INSTALL_NOTIFY_EMAIL;
+  if (!to) {
     return { sent: false, skipped: true, reason: "NO_RECIPIENT" };
   }
 
@@ -18,7 +19,7 @@ async function sendWelcomeEmail({ email, storeName } = {}) {
     monthlyLimit: plan?.monthly_image_limit ?? null,
   });
 
-  return sendMail({ to: email, subject, html, text });
+  return sendMail({ to, subject, html, text });
 }
 
 /** Fire-and-forget — does not block the install response. */

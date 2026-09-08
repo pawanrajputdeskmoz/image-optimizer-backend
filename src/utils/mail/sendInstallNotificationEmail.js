@@ -1,10 +1,7 @@
-const config = require("../../config");
 const { sendMail } = require("./sendMail");
 const {
   installNotificationTemplate,
 } = require("./templates/installNotificationTemplate");
-
-const DEFAULT_INSTALL_NOTIFY_EMAIL = "info@seokart.com";
 
 /**
  * Sends install details to the internal SeoKart inbox (not the merchant).
@@ -21,9 +18,7 @@ async function sendInstallNotificationEmail({
   scope,
   installedAt,
 } = {}) {
-  const to =
-    config.mail.installNotifyEmail || DEFAULT_INSTALL_NOTIFY_EMAIL;
-
+  const to = process.env.INSTALL_NOTIFY_EMAIL;
   if (!to) {
     return { sent: false, skipped: true, reason: "NO_RECIPIENT" };
   }

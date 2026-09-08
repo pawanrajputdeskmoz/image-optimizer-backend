@@ -1,10 +1,7 @@
-const config = require("../../config");
 const { sendMail } = require("./sendMail");
 const {
   uninstallNotificationTemplate,
 } = require("./templates/uninstallNotificationTemplate");
-
-const DEFAULT_INSTALL_NOTIFY_EMAIL = "info@seokart.com";
 
 /**
  * Sends uninstall details to the internal SeoKart inbox (not the merchant).
@@ -20,9 +17,7 @@ async function sendUninstallNotificationEmail({
   storeId,
   uninstalledAt,
 } = {}) {
-  const to =
-    config.mail.installNotifyEmail || DEFAULT_INSTALL_NOTIFY_EMAIL;
-
+  const to = process.env.INSTALL_NOTIFY_EMAIL;
   if (!to) {
     return { sent: false, skipped: true, reason: "NO_RECIPIENT" };
   }
