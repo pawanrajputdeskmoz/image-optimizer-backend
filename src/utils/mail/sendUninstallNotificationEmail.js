@@ -1,4 +1,4 @@
-const { sendMail } = require("./sendMail");
+const { sendMail, formatReplyTo } = require("./sendMail");
 const {
   uninstallNotificationTemplate,
 } = require("./templates/uninstallNotificationTemplate");
@@ -18,7 +18,8 @@ async function sendUninstallNotificationEmail({
   uninstalledAt,
 } = {}) {
   const to = process.env.INSTALL_NOTIFY_EMAIL || "info@seokart.com";
-  const cc =
+  // BCC (not CC): Intercom treats CC recipients as the conversation user.
+  const bcc =
     process.env.INSTALL_NOTIFY_CC || "prashantsingh.deskmoz@gmail.com";
 
   const displayName = storeName || storeHash || "Unknown store";
@@ -37,8 +38,8 @@ async function sendUninstallNotificationEmail({
   return sendMail({
     from: process.env.EMAIL_FROM || process.env.MAIL_FROM_EMAIL,
     to,
-    cc,
-    replyTo: clientEmail || undefined,
+    bcc,
+    replyTo: formatReplyTo(clientEmail, displayName),
     subject: `Uninstall: ${displayName} (${storeHash || "n/a"})`,
     html,
     text,

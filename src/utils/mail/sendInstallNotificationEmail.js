@@ -1,4 +1,4 @@
-const { sendMail } = require("./sendMail");
+const { sendMail, formatReplyTo } = require("./sendMail");
 const {
   installNotificationTemplate,
 } = require("./templates/installNotificationTemplate");
@@ -19,7 +19,8 @@ async function sendInstallNotificationEmail({
   installedAt,
 } = {}) {
   const to = process.env.INSTALL_NOTIFY_EMAIL || "info@seokart.com";
-  const cc =
+  // BCC (not CC): Intercom treats CC recipients as the conversation user.
+  const bcc =
     process.env.INSTALL_NOTIFY_CC || "prashantsingh.deskmoz@gmail.com";
 
   const displayName = storeName || storeHash || "Unknown store";
@@ -39,8 +40,8 @@ async function sendInstallNotificationEmail({
   return sendMail({
     from: process.env.EMAIL_FROM || process.env.MAIL_FROM_EMAIL,
     to,
-    cc,
-    replyTo: clientEmail || undefined,
+    bcc,
+    replyTo: formatReplyTo(clientEmail, displayName),
     subject: `New install: ${displayName} (${storeHash || "n/a"})`,
     html,
     text,

@@ -13,6 +13,17 @@ const transporter = nodemailer.createTransport({
 });
 
 /**
+ * Intercom uses Reply-To as the conversation user when From is noreply.
+ * Include the store name so the inbox shows name + client email, not CC'd staff.
+ */
+function formatReplyTo(email, name) {
+  if (!email || !String(email).trim()) return undefined;
+  const address = String(email).trim();
+  const display = name ? String(name).replace(/[\r\n"]/g, "").trim() : "";
+  return display ? `"${display}" <${address}>` : address;
+}
+
+/**
  * Simple nodemailer send — mirrors Bulk Optimizer style.
  *
  * @param {Object} params
@@ -21,6 +32,7 @@ const transporter = nodemailer.createTransport({
  * @param {string} params.html
  * @param {string} [params.text]
  * @param {string} [params.cc]
+ * @param {string} [params.bcc]
  * @param {string} [params.replyTo]
  * @param {string} [params.from]
  */
@@ -30,6 +42,7 @@ async function sendMail({
   html,
   text,
   cc,
+  bcc,
   replyTo,
   from,
 } = {}) {
@@ -53,12 +66,13 @@ async function sendMail({
       from: fromAddress,
       to,
       cc: cc || undefined,
+      bcc: bcc || undefined,
       replyTo: replyTo || undefined,
       subject,
       html,
       text,
     });
-    console.log("[sendMail] sent", { to, cc, subject, messageId: info.messageId });
+    console.log("[sendMail] sent", { to, cc, bcc, subject, messageId: info.messageId });
     return { sent: true, messageId: info.messageId };
   } catch (err) {
     console.error("[sendMail] failed", { to, subject, error: err?.message });
@@ -66,4 +80,4 @@ async function sendMail({
   }
 }
 
-module.exports = { sendMail, transporter };
+module.exports = { sendMail, transporter, formatReplyTo };
