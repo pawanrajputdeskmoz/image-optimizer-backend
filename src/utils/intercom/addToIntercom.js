@@ -52,7 +52,6 @@ async function addToIntercom(shopUrl) {
         `${INTERCOM_API_BASE}/contacts`,
         {
           role: "user",
-          external_id: ctx.contactExternalId,
           ...contactPayload,
         },
         headers

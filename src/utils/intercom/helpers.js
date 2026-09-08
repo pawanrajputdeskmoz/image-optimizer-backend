@@ -61,7 +61,7 @@ function buildContactExternalId(storeHash) {
   if (!hash) return "";
   if (hash.startsWith(`${INTERCOM_USER_ID_PREFIX}_`)) return hash;
   return `${INTERCOM_USER_ID_PREFIX}_${hash}`;
-  
+
 }
 
 /**
@@ -179,7 +179,6 @@ function buildCustomAttributes(shopUrl, ctx, overrides = {}) {
 
   return {
     // Image 1 attributes
-    "User id": ctx.contactExternalId || buildContactExternalId(shopUrl),
     "Store hash": shopUrl,
     "Uninstall/install status":
       overrides.installStatus ?? ctx.installStatus,
@@ -214,7 +213,10 @@ function buildCustomAttributes(shopUrl, ctx, overrides = {}) {
 }
 
 function buildContactPayload(shopUrl, ctx, overrides = {}) {
+  const userId = ctx.contactExternalId || buildContactExternalId(shopUrl);
   return {
+    user_id: userId,
+    external_id: userId,
     email: ctx.email || undefined,
     name: ctx.ownerName || ctx.email || shopUrl,
     custom_attributes: buildCustomAttributes(shopUrl, ctx, overrides),
