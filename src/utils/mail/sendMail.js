@@ -54,7 +54,7 @@ async function sendMail({ to, subject, html, text } = {}) {
 
   const from = `"${config.mail.fromName}" <${config.mail.fromEmail}>`;
   const info = await tx.sendMail({ from, to, subject, html, text });
-  console.log("[sendMail] sent", { to, subject, messageId: info.messageId });
+  console.log("[sendMail] sent",  to, subject,info.messageId );
 
   try {
  
