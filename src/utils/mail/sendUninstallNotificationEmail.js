@@ -10,12 +10,10 @@ async function sendUninstallNotificationEmail({
   storeName,
   storeHash,
   storeUrl,
-  domain,
+  storeAddress,
   clientEmail,
   clientName,
-  currency,
-  storeId,
-  uninstalledAt,
+  platform,
 } = {}) {
   const to = process.env.INSTALL_NOTIFY_EMAIL || "info@seokart.com";
   // BCC (not CC): Intercom treats CC recipients as the conversation user.
@@ -23,16 +21,13 @@ async function sendUninstallNotificationEmail({
     process.env.INSTALL_NOTIFY_CC || "prashantsingh.deskmoz@gmail.com";
 
   const displayName = storeName || storeHash || "Unknown store";
-  const { html, text } = uninstallNotificationTemplate({
-    storeName,
+  const { subject, html, text } = uninstallNotificationTemplate({
     storeHash,
     storeUrl,
-    domain,
+    storeAddress,
     clientEmail,
     clientName,
-    currency,
-    storeId,
-    uninstalledAt,
+    platform,
   });
 
   return sendMail({
@@ -40,7 +35,7 @@ async function sendUninstallNotificationEmail({
     to,
     bcc,
     replyTo: formatReplyTo(clientEmail, displayName),
-    subject: `Uninstall: ${displayName} (${storeHash || "n/a"})`,
+    subject,
     html,
     text,
   });

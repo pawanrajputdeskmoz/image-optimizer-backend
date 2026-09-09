@@ -8,129 +8,50 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+/** PHP: list($name) = explode(' ', $name); — first word only */
+function firstName(name) {
+  if (!name || !String(name).trim()) return "";
+  return String(name).trim().split(/\s+/)[0];
+}
+
 /**
- * Builds the internal uninstall-notification email (sent to SeoKart, not the merchant).
+ * Uninstall notification body — matches SEOKart PHP template.
  *
- * @param {Object} vars
- * @param {string} [vars.storeName]
- * @param {string} [vars.storeHash]
- * @param {string} [vars.storeUrl]
- * @param {string} [vars.domain]
- * @param {string} [vars.clientEmail]
- * @param {string} [vars.clientName]
- * @param {string} [vars.currency]
- * @param {string|number} [vars.storeId]
- * @param {Date|string} [vars.uninstalledAt]
  * @returns {{ subject: string, html: string, text: string }}
  */
 function uninstallNotificationTemplate(vars = {}) {
   const {
-    storeName,
     storeHash,
     storeUrl,
-    domain,
+    storeAddress,
     clientEmail,
     clientName,
-    currency,
-    storeId,
-    uninstalledAt,
+    platform = "Bigcommerce",
   } = vars;
 
-  const displayStore = storeName || storeHash || "Unknown store";
-  const uninstalledLabel = uninstalledAt
-    ? new Date(uninstalledAt).toISOString()
-    : new Date().toISOString();
+  const name = firstName(clientName);
+  const subject = "Oops! What happened?";
 
-  const subject = `Image Optimizer uninstalled — ${displayStore}`;
+  const html =
+    `Subject: ${escapeHtml(subject)} <br/><br/>` +
+    `Name: ${escapeHtml(name)} <br/><br/>` +
+    `Email: ${escapeHtml(clientEmail || "")} <br/><br/>` +
+    `Address: ${escapeHtml(storeAddress || "")} <br/><br/>` +
+    `Store Url: ${escapeHtml(storeUrl || "")} <br/><br/>` +
+    `Store Hash: ${escapeHtml(storeHash || "")} <br/><br/>` +
+    `Platform: ${escapeHtml(platform)} <br/><br/>`;
 
-  const rows = [
-    ["Store name", storeName],
-    ["Store hash", storeHash],
-    ["Store ID", storeId != null ? String(storeId) : null],
-    ["Store URL", storeUrl],
-    ["Domain", domain],
-    ["Client email", clientEmail],
-    ["Client name", clientName],
-    ["Currency", currency],
-    ["Uninstalled at (UTC)", uninstalledLabel],
-  ].filter(([, value]) => value != null && String(value).trim() !== "");
+  const text = [
+    `Subject: ${subject}`,
+    `Name: ${name}`,
+    `Email: ${clientEmail || ""}`,
+    `Address: ${storeAddress || ""}`,
+    `Store Url: ${storeUrl || ""}`,
+    `Store Hash: ${storeHash || ""}`,
+    `Platform: ${platform}`,
+  ].join("\n\n");
 
-  const detailRowsHtml = rows
-    .map(
-      ([label, value]) => `
-                    <tr>
-                      <td style="padding:8px 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#64748b;width:140px;vertical-align:top;">
-                        ${escapeHtml(label)}
-                      </td>
-                      <td style="padding:8px 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#0f172a;word-break:break-word;">
-                        ${escapeHtml(value)}
-                      </td>
-                    </tr>`
-    )
-    .join("");
-
-  const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>${escapeHtml(subject)}</title>
-</head>
-<body style="margin:0;padding:0;background-color:#f1f5f9;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background-color:#f1f5f9;">
-    <tr>
-      <td align="center" style="padding:32px 16px;">
-        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="border-collapse:collapse;max-width:600px;width:100%;background-color:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(15,23,42,0.08);">
-          <tr>
-            <td style="background-color:#991b1b;padding:28px 24px;text-align:center;">
-              <h1 style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:20px;line-height:1.3;color:#ffffff;font-weight:700;">
-                Image Optimizer — Uninstall
-              </h1>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:28px 24px 8px 24px;">
-              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.6;color:#334155;">
-                A BigCommerce store has uninstalled Image Optimizer. Details below:
-              </p>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:16px 24px 28px 24px;">
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;">
-                <tr>
-                  <td style="padding:16px 20px;">
-                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
-                      ${detailRowsHtml}
-                    </table>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-          <tr>
-            <td style="background-color:#f8fafc;padding:18px 24px;text-align:center;border-top:1px solid #e2e8f0;">
-              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.5;color:#94a3b8;">
-                Automated uninstall notification — Image Optimizer
-              </p>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>`;
-
-  const textLines = [
-    "Image Optimizer — Uninstall",
-    "",
-    "A BigCommerce store has uninstalled Image Optimizer.",
-    "",
-    ...rows.map(([label, value]) => `${label}: ${value}`),
-  ];
-
-  return { subject, html, text: textLines.join("\n") };
+  return { subject, html, text };
 }
 
 module.exports = { uninstallNotificationTemplate };

@@ -172,16 +172,13 @@ exports.installApp = async (req, reply) => {
       storeName: storeInfo?.name || null,
       storeHash,
       storeUrl: resolveStoreUrl(storeInfo, storeHash),
-      domain: storeInfo?.domain || null,
+      storeAddress: storeInfo?.address || null,
       clientEmail: user?.email || null,
       clientName:
         `${storeInfo?.first_name || ""} ${storeInfo?.last_name || ""}`.trim() ||
         user?.username ||
         null,
-      currency: storeInfo?.currency || null,
-      storeId: storeInfo?.id ?? null,
-      scope: scope || null,
-      installedAt: new Date(),
+      platform: "Bigcommerce",
     });
 
     queueAddToIntercom(storeHash);
@@ -257,12 +254,10 @@ exports.uninstallApp = async (req, reply) => {
       storeName: storeUser?.store_name || null,
       storeHash,
       storeUrl: storeUser?.storeUrl || null,
-      domain: storeUser?.primaryDomain || null,
+      storeAddress: null,
       clientEmail: storeUser?.email || null,
       clientName: storeUser?.username || null,
-      currency: storeUser?.currency || null,
-      storeId: storeUser?.store_id ?? null,
-      uninstalledAt,
+      platform: "Bigcommerce",
     });
 
     queueUninstallFromIntercom(storeHash);

@@ -10,13 +10,10 @@ async function sendInstallNotificationEmail({
   storeName,
   storeHash,
   storeUrl,
-  domain,
+  storeAddress,
   clientEmail,
   clientName,
-  currency,
-  storeId,
-  scope,
-  installedAt,
+  platform,
 } = {}) {
   const to = process.env.INSTALL_NOTIFY_EMAIL || "info@seokart.com";
   // BCC (not CC): Intercom treats CC recipients as the conversation user.
@@ -24,17 +21,13 @@ async function sendInstallNotificationEmail({
     process.env.INSTALL_NOTIFY_CC || "prashantsingh.deskmoz@gmail.com";
 
   const displayName = storeName || storeHash || "Unknown store";
-  const { html, text } = installNotificationTemplate({
-    storeName,
+  const { subject, html, text } = installNotificationTemplate({
     storeHash,
     storeUrl,
-    domain,
+    storeAddress,
     clientEmail,
     clientName,
-    currency,
-    storeId,
-    scope,
-    installedAt,
+    platform,
   });
 
   return sendMail({
@@ -42,7 +35,7 @@ async function sendInstallNotificationEmail({
     to,
     bcc,
     replyTo: formatReplyTo(clientEmail, displayName),
-    subject: `New install: ${displayName} (${storeHash || "n/a"})`,
+    subject,
     html,
     text,
   });
