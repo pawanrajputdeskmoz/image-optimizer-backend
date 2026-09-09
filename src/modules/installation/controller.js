@@ -314,13 +314,8 @@ exports.loadBigComApp = async (req, reply) => {
         status: bcErr?.response?.status,
         storeHash,
       });
-
-      return reply.status(bcErr?.response?.status === 401 ? 401 : 502).send({
-        success: false,
-        message: "Failed to refresh store details from BigCommerce",
-        error:
-          process.env.NODE_ENV === "development" ? bcErr.message : undefined,
-      });
+      // Fall back to DB user so email/shop still reach the frontend (localStorage).
+      syncedUser = userInfo;
     }
 
     if (!syncedUser) {
@@ -329,6 +324,13 @@ exports.loadBigComApp = async (req, reply) => {
         message: "User not found after store sync",
       });
     }
+
+    // Prefer DB email; fall back to JWT owner/user so localStorage always gets an email when available
+    const email =
+      syncedUser.email ||
+      owner?.email ||
+      user?.email ||
+      null;
 
     const api_token = signAppApiToken(storeHash, userInfo.access_token);
     const intercomUserId = buildContactExternalId(storeHash);
@@ -354,7 +356,7 @@ exports.loadBigComApp = async (req, reply) => {
         store_name: syncedUser.store_name || null,
         currency: syncedUser.currency || null,
         primaryDomain: syncedUser.primaryDomain || null,
-        email: syncedUser.email || null,
+        email,
         user_id: userId,
         user_hash: userHash,
         user,
