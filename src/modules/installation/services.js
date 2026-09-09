@@ -84,7 +84,7 @@ exports.syncUserStoreFromBigCommerce = async (storeHash, accessToken) => {
   return User.findOneAndUpdate(
     { store_hash: storeHash },
     { $set: updateFields },
-    { new: true }
+    { returnDocument: "after" }
   ).lean();
 };
 
@@ -144,7 +144,7 @@ exports.saveInstalledStore = async ({
         store_hash: storeHash,
       },
     },
-    { upsert: true, new: true, runValidators: true }
+    { upsert: true, returnDocument: "after", runValidators: true }
   ).then(async (savedUser) => {
     const { ensureClientPlan } = require("../plans/service");
     await ensureClientPlan(storeHash, "free", savedUser._id);

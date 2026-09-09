@@ -201,7 +201,7 @@ exports.compressBrandImage = async ({
           original_image_path: originalImagePath,
         },
       },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
+      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
     );
 
     await BrandImageStatus.updateOne(
@@ -525,7 +525,7 @@ async function updateStoreStats({
         },
         $setOnInsert: { store_hash: storeHash },
       },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
+      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
     );
 
     const totalOrig = Number(statDoc?.total_original_size) || 0;

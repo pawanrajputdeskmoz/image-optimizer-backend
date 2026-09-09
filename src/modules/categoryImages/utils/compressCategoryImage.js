@@ -329,7 +329,7 @@ exports.compressCategoryImage = async ({
           original_image_path: originalImagePath,
         },
       },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
+      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
     );
 
     await CategoryImageStatus.updateOne(
@@ -487,7 +487,7 @@ exports.compressCategoryImage = async ({
             $set: { last_optimized_at: new Date() },
             $setOnInsert: { store_hash: storeHash },
           },
-          { upsert: true, new: true, setDefaultsOnInsert: true }
+          { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
         );
 
         const totalOrig = Number(statDoc?.total_original_size) || 0;
@@ -672,7 +672,7 @@ exports.compressCategoryImage = async ({
           },
           $setOnInsert: { store_hash: storeHash },
         },
-        { upsert: true, new: true, setDefaultsOnInsert: true }
+        { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
       );
 
       const totalOrig = Number(statDoc?.total_original_size) || 0;

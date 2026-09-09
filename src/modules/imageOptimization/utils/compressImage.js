@@ -348,7 +348,7 @@ exports.compressImage = async ({
           image_quality: imageQuality,
         },
       },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
+      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
     );
 
     await Promise.all([
@@ -697,7 +697,7 @@ exports.compressImage = async ({
               },
               $setOnInsert: { store_hash: storeHash },
             },
-            { upsert: true, new: true, setDefaultsOnInsert: true }
+            { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
           );
 
           const totalOrig = Number(statDoc?.total_original_size) || 0;

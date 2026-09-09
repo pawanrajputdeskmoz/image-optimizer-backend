@@ -802,7 +802,7 @@ exports.recordBrandJobItemResult = async ({
     const jobUpdate = BrandJob.findOneAndUpdate(
       { job_uuid: jobUuid },
       { $inc: jobIncrement },
-      { new: true }
+      { returnDocument: "after" }
     );
 
     const [, updatedJob] = await Promise.all([itemUpdate, jobUpdate]);

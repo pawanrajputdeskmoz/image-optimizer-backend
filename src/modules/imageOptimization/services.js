@@ -1781,7 +1781,7 @@ exports.incrementStoreOptimizationStats = async ({
         $set: { last_optimized_at: new Date() },
         $setOnInsert: { store_hash: storeHash },
       },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
+      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
     );
 
     const totalOrig = Number(statDoc?.total_original_size) || 0;

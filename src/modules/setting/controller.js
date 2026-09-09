@@ -180,7 +180,7 @@ exports.upsertStoreOptimizationSettings = async (req, reply) => {
     { $set },
     {
       upsert: true,
-      new: true,
+      returnDocument: "after",
       runValidators: true,
       setDefaultsOnInsert: true,
     }

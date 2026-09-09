@@ -5,13 +5,9 @@ const {
   ImageStatus,
   ImageOldData,
   ImageJobItem,
-  StoreImageStat,
 } = require("../../../models");
 const { deleteFile } = require("../../../utils/deleteFile");
 const { resolveProductImageUrl } = require("./urls");
-const {
-  adjustPendingImages,
-} = require("../../../utils/storePendingImages");
 const {
   uploadProductImage,
   deleteProductImage,
@@ -587,8 +583,7 @@ async function restoreSingleImage({
     Number(imageOldData?.saved_bytes) ||
     (origSize > 0 ? Math.max(0, origSize - optSize) : 0);
 
-  // Restore returns the image to an unoptimized state — pending counters are
-  // bumped below so the dashboard reflects images waiting to be optimized again.
+  // Restore returns the image to an unoptimized state.
   const cleanupTasks = [
     ImageOptimization.deleteOne(lookup),
     ImageOldData.deleteOne(lookup),
@@ -652,8 +647,8 @@ async function restoreSingleImage({
     }
   );
 
-  // Restore returns the image to an unoptimized state — it needs optimize again.
-  await adjustPendingImages(storeHash, 1);
+  // Do not bump pending_images on restore — that counter is the optimize
+  // backlog (quota-deferred total), not "images returned to unoptimized".
 
   const oldAltText = imageOldData?.altText ?? null;
   const oldImageName = imageOldData?.imageName ?? null;
