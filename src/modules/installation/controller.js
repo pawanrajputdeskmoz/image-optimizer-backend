@@ -6,8 +6,8 @@ const {
   verifySignedPayloadJwt,
   signAppApiToken,
   resolveStoreUrl,
+  fetchStoreInfo,
 } = require("./services");
-const { get } = require("../../utils/axiosUtils");
 const { trackProductWebhookBurst } = require("../imageOptimization/services");
 const { trackCategoryWebhookBurst } = require("../categoryImages/services");
 const { appendWebhookLog, upsertWebhookEvent } = require("./utils/webhookActivityLog");
@@ -120,17 +120,10 @@ exports.installApp = async (req, reply) => {
     }
     console.log("running.... 1`")
 
-    const storeInfoResponse = await get(
-      `https://api.bigcommerce.com/stores/${storeHash}/v2/store`,
-      {
-        "X-Auth-Token": access_token,
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      }
-    );
-    const storeInfo = storeInfoResponse?.data || {};
-    console.log("running.... 2")
- 
+    const storeInfo = (await fetchStoreInfo(storeHash, access_token)) || {};
+    const clientName =
+      `${storeInfo.first_name || ""} ${storeInfo.last_name || ""}`.trim() || null;
+
     const installedUser = await saveInstalledStore({
       storeHash,
       access_token,
@@ -142,9 +135,8 @@ exports.installApp = async (req, reply) => {
     console.log("[install] completed", {
       storeHash,
       storeName: storeInfo.name || null,
+      clientName,
     });
-    console.log("running.... 3")
-
 
     // Reinstall-safe: keep existing settings; create defaults only if missing
     await StoreOptimizationSettings.findOneAndUpdate(
@@ -167,17 +159,14 @@ exports.installApp = async (req, reply) => {
       },
       { upsert: true }
     );
-    console.log("running.... 4")
+
     queueInstallNotificationEmail({
-      storeName: storeInfo?.name || null,
+      storeName: storeInfo.name || null,
       storeHash,
       storeUrl: resolveStoreUrl(storeInfo, storeHash),
-      storeAddress: storeInfo?.address || null,
+      storeAddress: storeInfo.address || null,
       clientEmail: user?.email || null,
-      clientName:
-        `${storeInfo?.first_name || ""} ${storeInfo?.last_name || ""}`.trim() ||
-        user?.username ||
-        null,
+      clientName,
       platform: "Bigcommerce",
     });
 
@@ -241,12 +230,20 @@ exports.uninstallApp = async (req, reply) => {
     const storeUser = await User.findOne({ store_hash: storeHash }).lean();
     const uninstalledAt = new Date();
 
+    const storeInfo = storeUser?.access_token
+      ? await fetchStoreInfo(storeHash, storeUser.access_token)
+      : null;
+    const clientName =
+      `${storeInfo?.first_name || ""} ${storeInfo?.last_name || ""}`.trim() ||
+      null;
+
     await User.findOneAndUpdate(
       { store_hash: storeHash },
       {
         installStatus: "uninstalled",
         lastUninstalledAt: uninstalledAt,
         access_token: null,
+        ...(clientName ? { username: clientName } : {}),
       }
     );
 
@@ -254,9 +251,9 @@ exports.uninstallApp = async (req, reply) => {
       storeName: storeUser?.store_name || null,
       storeHash,
       storeUrl: storeUser?.storeUrl || null,
-      storeAddress: null,
+      storeAddress: storeInfo?.address || null,
       clientEmail: storeUser?.email || null,
-      clientName: storeUser?.username || null,
+      clientName,
       platform: "Bigcommerce",
     });
 

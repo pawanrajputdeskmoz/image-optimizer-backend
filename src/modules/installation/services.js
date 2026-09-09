@@ -2,6 +2,27 @@ const { post, get } = require("../../utils/axiosUtils");
 const { User } = require("../../models");
 const jwt = require("jsonwebtoken");
 
+exports.fetchStoreInfo = async (storeHash, accessToken) => {
+  if (!storeHash || !accessToken) return null;
+  try {
+    const storeInfo = await get(
+      `https://api.bigcommerce.com/stores/${storeHash}/v2/store`,
+      {
+        "X-Auth-Token": accessToken,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      }
+    );
+    return storeInfo || null;
+  } catch (err) {
+    console.error("[store] fetchStoreInfo failed:", {
+      storeHash,
+      message: err?.message,
+      status: err?.response?.status,
+    });
+    return null;
+  }
+};
 
 exports.resolveStoreUrl = (storeInfo, storeHash) => {
   const secureUrl =
@@ -92,7 +113,9 @@ exports.buildInstallUpdatePayload = ({
   installStatus: "installed",
   scope,
   email: user.email,
-  username: `${storeInfo.first_name || ""} ${storeInfo.last_name || ""}`.trim(),
+  username:
+    `${storeInfo?.first_name || ""} ${storeInfo?.last_name || ""}`.trim() ||
+    "unknown",
   ...exports.buildStoreUpdateFields(storeInfo, storeHash),
 });
 
@@ -111,6 +134,7 @@ exports.saveInstalledStore = async ({
     storeHash,
   });
 
+  // store_id only in $set — putting it in both $set and $setOnInsert causes a Mongo conflict
   return User.findOneAndUpdate(
     { store_hash: storeHash },
     {
@@ -118,14 +142,13 @@ exports.saveInstalledStore = async ({
       $setOnInsert: {
         provider: "bigcommerce",
         store_hash: storeHash,
-        store_id: storeInfo.id,
       },
     },
-    { upsert: true, new: true }
-  ).then(async (user) => {
+    { upsert: true, new: true, runValidators: true }
+  ).then(async (savedUser) => {
     const { ensureClientPlan } = require("../plans/service");
-    await ensureClientPlan(storeHash, "free", user._id);
-    return user;
+    await ensureClientPlan(storeHash, "free", savedUser._id);
+    return savedUser;
   });
 };
 

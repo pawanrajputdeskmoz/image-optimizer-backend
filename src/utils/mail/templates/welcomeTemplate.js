@@ -25,7 +25,7 @@ function welcomeTemplate(vars = {}) {
   const safePlan = planName ? escapeHtml(planName) : null;
   const hasLimit = Number.isFinite(monthlyLimit);
 
-  const subject = "Welcome to Image Optimizer";
+  const subject = "Welcome to Image Optimizer by SEOkart";
 
   const introMessage = escapeHtml(
     message ||

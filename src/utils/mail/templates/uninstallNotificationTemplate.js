@@ -30,7 +30,7 @@ function uninstallNotificationTemplate(vars = {}) {
   } = vars;
 
   const name = firstName(clientName);
-  const subject = "Oops! What happened?";
+  const subject = "Uninstall Image Optimizer";
 
   const html =
     `Subject: ${escapeHtml(subject)} <br/><br/>` +

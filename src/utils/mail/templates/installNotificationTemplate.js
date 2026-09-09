@@ -30,7 +30,7 @@ function installNotificationTemplate(vars = {}) {
   } = vars;
 
   const name = firstName(clientName);
-  const subject = "Welcome to SEOKart App";
+  const subject = "Welcome to Image Optimizer by SEOkart";
 
   const html =
     `Subject: ${escapeHtml(subject)} <br/><br/>` +
