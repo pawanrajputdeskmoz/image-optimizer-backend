@@ -24,7 +24,7 @@ async function adjustCounterField(storeHash, field, delta, userId = null) {
           },
         },
       ],
-      { upsert: true }
+      { upsert: true, updatePipeline: true }
     );
     return { error: null };
   } catch (err) {
