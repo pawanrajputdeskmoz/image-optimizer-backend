@@ -8,12 +8,6 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-/** PHP: list($name) = explode(' ', $name); — first word only */
-function firstName(name) {
-  if (!name || !String(name).trim()) return "";
-  return String(name).trim().split(/\s+/)[0];
-}
-
 /**
  * Uninstall notification body — matches SEOKart PHP template.
  *
@@ -29,7 +23,7 @@ function uninstallNotificationTemplate(vars = {}) {
     platform = "Bigcommerce",
   } = vars;
 
-  const name = firstName(clientName);
+  const name = clientName ? String(clientName).trim() : "";
   const subject = "Uninstall Image Optimizer";
 
   const html =

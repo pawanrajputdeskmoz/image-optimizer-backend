@@ -8,12 +8,6 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-/** PHP: list($name) = explode(' ', $name); — first word only */
-function firstName(name) {
-  if (!name || !String(name).trim()) return "";
-  return String(name).trim().split(/\s+/)[0];
-}
-
 /**
  * Install notification body — matches SEOKart PHP template.
  *
@@ -29,7 +23,7 @@ function installNotificationTemplate(vars = {}) {
     platform = "Bigcommerce",
   } = vars;
 
-  const name = firstName(clientName);
+  const name = clientName ? String(clientName).trim() : "";
   const subject = "Welcome to Image Optimizer by SEOkart";
 
   const html =
