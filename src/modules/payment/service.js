@@ -4,6 +4,7 @@ const PaymentHistory = require("../../models/PaymentHistory");
 const Plan = require("../../models/Plan");
 const ClientPlan = require("../../models/ClientPlan");
 const { getPlanBySlug, upgradeStorePlan } = require("../plans/service");
+const { createPaypalBillingPlan } = require("../admin/plans/paypalBilling");
 const { syncCurrentMonthUsage } = require("../../utils/monthlyUsage");
 
 let cachedToken = null;
@@ -425,6 +426,44 @@ async function syncSubscription({
   return { storeHash: resolvedStoreHash, plan, status: "active" };
 }
 
+function paypalPlanMissing(status, data) {
+  const name = String(data?.name || "");
+  const issues = Array.isArray(data?.details)
+    ? data.details.map((detail) => detail?.issue).filter(Boolean).join(" ")
+    : "";
+  return (
+    status === 404 ||
+    name === "RESOURCE_NOT_FOUND" ||
+    /INVALID_RESOURCE_ID|RESOURCE_NOT_FOUND/.test(issues)
+  );
+}
+
+async function createPaypalSubscription(accessToken, paypalPlanId, storeHash) {
+  const { baseUrl, subscriptionReturnUrl, subscriptionCancelUrl } = config.paypal;
+  const { data, status } = await axios.post(
+    `${baseUrl}/v1/billing/subscriptions`,
+    {
+      plan_id: paypalPlanId,
+      custom_id: storeHash,
+      application_context: {
+        brand_name: "Image Optimizer",
+        user_action: "SUBSCRIBE_NOW",
+        return_url: subscriptionReturnUrl,
+        cancel_url: subscriptionCancelUrl,
+      },
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 30_000,
+      validateStatus: () => true,
+    }
+  );
+  return { data, status };
+}
+
 /** Create a PayPal billing subscription for a paid plan. */
 exports.createSubscription = async (storeHash, planId) => {
   const slug = String(planId || "").trim().toLowerCase();
@@ -449,31 +488,31 @@ exports.createSubscription = async (storeHash, planId) => {
 
   try {
     const accessToken = await getPaypalAccessToken();
-    const { baseUrl, subscriptionReturnUrl, subscriptionCancelUrl } = config.paypal;
+    let paypalPlanId = plan.paypal_plan_id;
+    let { data, status } = await createPaypalSubscription(accessToken, paypalPlanId, storeHash);
 
-    const { data, status } = await axios.post(
-      `${baseUrl}/v1/billing/subscriptions`,
-      {
-        plan_id: plan.paypal_plan_id,
-        custom_id: storeHash,
-        application_context: {
-          brand_name: "Image Optimizer",
-          user_action: "SUBSCRIBE_NOW",
-          return_url: subscriptionReturnUrl,
-          cancel_url: subscriptionCancelUrl,
-        },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-        timeout: 30_000,
-        validateStatus: () => true,
+    if (paypalPlanMissing(status, data)) {
+      const registered = await createPaypalBillingPlan({
+        name: plan.name,
+        description: plan.description,
+        price: plan.price,
+        currency: plan.currency || "USD",
+      });
+      if (registered.error || !registered.planId) {
+        console.error("[createSubscription] plan re-register failed", registered.error);
+        return {
+          error: registered.error || "PayPal plan registration failed",
+          code: "PAYPAL_SUBSCRIPTION_FAILED",
+          statusCode: 502,
+        };
       }
-    );
+      paypalPlanId = registered.planId;
+      await Plan.updateOne({ _id: plan._id }, { $set: { paypal_plan_id: paypalPlanId } });
+      ({ data, status } = await createPaypalSubscription(accessToken, paypalPlanId, storeHash));
+    }
 
     if (status >= 400 || !data?.id) {
+      console.error("[createSubscription] PayPal rejected", status, data?.name, data?.message);
       return {
         error: data?.message || data?.name || "PayPal subscription create failed",
         code: "PAYPAL_SUBSCRIPTION_FAILED",
@@ -485,7 +524,7 @@ exports.createSubscription = async (storeHash, planId) => {
     await syncSubscription({
       storeHash,
       subscriptionId: data.id,
-      paypalPlanId: plan.paypal_plan_id,
+      paypalPlanId,
       status: "pending",
     });
 
