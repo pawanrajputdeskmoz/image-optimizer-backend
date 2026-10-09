@@ -1,8 +1,10 @@
+const fs = require("fs");
+const path = require("path");
 const ImageOptimizationLog = require("../../../models/ImageOptimizationLog");
 const WebhookLog = require("../../../models/WebhookLog");
 const CategoryWebhookLog = require("../../../models/CategoryWebhookLog");
 const CategoryImageLog = require("../../../models/CategoryImageLog");
-const BrandImageJobLog = require("../../../models/BrandImageJobLog");
+const { LOGS_DIR, dateStamp } = require("../../../utils/fileLogger");
 const { buildPagination, resolvePagination } = require("../utils/pagination");
 
 const RECENT_ERROR_LOG_LIMIT = 10;
@@ -33,20 +35,6 @@ const ERROR_LOG_SOURCES = [
       job_type: 1,
       step: 1,
       category_id: 1,
-    },
-  },
-  {
-    source: "brand_image",
-    category: "brand-image",
-    model: BrandImageJobLog,
-    fields: {
-      message: 1,
-      created_at: 1,
-      store_hash: 1,
-      job_uuid: 1,
-      job_type: 1,
-      step: 1,
-      brand_id: 1,
     },
   },
   {
@@ -107,7 +95,6 @@ function mapErrorLogRow(row, { source, category }) {
     product_id: row.product_id ?? null,
     image_id: row.image_id ?? null,
     category_id: row.category_id ?? null,
-    brand_id: row.brand_id ?? null,
   };
 }
 
@@ -162,13 +149,19 @@ const LOG_SOURCES = {
   },
 };
 
-function buildLogFilter({ storeHash, jobUuid, logType, step, traceId }) {
+function buildLogFilter({ storeHash, jobUuid, logType, step, traceId, date }) {
   const filter = {};
   if (storeHash) filter.store_hash = storeHash;
   if (logType) filter.log_type = logType;
   if (step) filter.step = step;
   if (jobUuid) filter.job_uuid = jobUuid;
   if (traceId) filter.trace_id = traceId;
+  if (date && DATE_RE.test(String(date))) {
+    const [year, month, day] = String(date).split("-").map(Number);
+    const start = new Date(year, month - 1, day, 0, 0, 0, 0);
+    const end = new Date(year, month - 1, day, 23, 59, 59, 999);
+    filter.created_at = { $gte: start, $lte: end };
+  }
   return filter;
 }
 
@@ -181,6 +174,7 @@ exports.listLogs = async ({
   logType = null,
   step = null,
   traceId = null,
+  date = null,
 }) => {
   const logSource = LOG_SOURCES[source];
   if (!logSource) {
@@ -189,12 +183,23 @@ exports.listLogs = async ({
     };
   }
 
+  if (date && !DATE_RE.test(String(date))) {
+    return { error: "Invalid date. Use YYYY-MM-DD" };
+  }
+
   const { page: resolvedPage, limit: resolvedLimit, skip } = resolvePagination(
     { page, limit },
     { limit: 50 }
   );
 
-  const filter = buildLogFilter({ storeHash, jobUuid, logType, step, traceId });
+  const filter = buildLogFilter({
+    storeHash,
+    jobUuid,
+    logType,
+    step,
+    traceId,
+    date,
+  });
   const Model = logSource.model;
 
   const [items, total] = await Promise.all([
@@ -311,4 +316,95 @@ exports.getLogTrace = async (source, traceId) => {
     .lean();
 
   return { error: null, items };
+};
+
+const LOG_SEPARATOR = "-".repeat(88);
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function parseKeyedBlock(block) {
+  const fields = {};
+  let currentKey = null;
+  for (const line of String(block || "").split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const match = line.match(/^([A-Za-z][A-Za-z0-9 _-]*)\s{2,}([\s\S]*)$/);
+    if (match && !line.startsWith(" ") && !line.startsWith("{")) {
+      currentKey = match[1].trim();
+      fields[currentKey] = match[2];
+      continue;
+    }
+    if (currentKey) {
+      fields[currentKey] = `${fields[currentKey]}\n${line}`;
+    }
+  }
+  return fields;
+}
+
+function parseErrorLogFile(text) {
+  const chunks = String(text || "")
+    .split(LOG_SEPARATOR)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  const entries = [];
+  for (let i = 0; i < chunks.length; i += 1) {
+    const header = parseKeyedBlock(chunks[i]);
+    if (!header.TIME && !header.EVENT) continue;
+    const next = chunks[i + 1] ? parseKeyedBlock(chunks[i + 1]) : null;
+    const hasBody = next && !next.TIME && !next.EVENT;
+    if (hasBody) i += 1;
+    const body = hasBody ? next : {};
+    entries.push({
+      time: header.TIME || null,
+      scope: header.SCOPE || body.SCOPE || null,
+      event: header.EVENT || null,
+      request_id: header["REQUEST ID"] || body.requestId || null,
+      method: body.method || null,
+      url: body.url || null,
+      status_code: body.statusCode ? Number(body.statusCode) : null,
+      message: body.error || body.url || header.EVENT || null,
+      fields: body,
+      raw: [chunks[i - (hasBody ? 1 : 0)], hasBody ? chunks[i] : ""]
+        .filter(Boolean)
+        .join("\n"),
+    });
+  }
+  return entries;
+}
+
+exports.listSystemErrorLogs = async ({ date = null, page = 1, limit = 20 } = {}) => {
+  const resolvedDate = DATE_RE.test(String(date || "")) ? String(date) : dateStamp();
+  if (!DATE_RE.test(resolvedDate)) {
+    return { error: "Invalid date. Use YYYY-MM-DD", items: [], pagination: null };
+  }
+
+  const filePath = path.resolve(LOGS_DIR, `error-${resolvedDate}.log`);
+  if (!filePath.startsWith(path.resolve(LOGS_DIR))) {
+    return { error: "Invalid date", items: [], pagination: null };
+  }
+
+  const { page: resolvedPage, limit: resolvedLimit, skip } = resolvePagination(
+    { page, limit },
+    { limit: 20 }
+  );
+
+  let text = "";
+  try {
+    text = await fs.promises.readFile(filePath, "utf8");
+  } catch (err) {
+    if (err?.code !== "ENOENT") throw err;
+  }
+
+  const parsed = parseErrorLogFile(text).reverse();
+  const pageItems = parsed.slice(skip, skip + resolvedLimit).map((row, index) => ({
+    _id: `${resolvedDate}-${skip + index}`,
+    ...row,
+  }));
+
+  return {
+    error: null,
+    date: resolvedDate,
+    file: path.basename(filePath),
+    items: pageItems,
+    pagination: buildPagination(resolvedPage, resolvedLimit, parsed.length),
+  };
 };

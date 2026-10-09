@@ -253,7 +253,6 @@ const ENCODE_FORMATS = new Set(["jpeg", "png", "webp", "gif", "avif"]);
 const ALLOWED_OUTPUT_FORMATS = {
   product: new Set(["gif", "jpeg", "png", "webp"]),
   category: new Set(["jpeg", "gif", "png"]),
-  brand: new Set(["jpeg", "png"]),
 };
 
 function normalizeOptimizeFormat(format) {

@@ -17,11 +17,6 @@ const relationBatchSize = Math.min(
 );
 
 const storeOwnedModels = [
-  models.BrandImage,
-  models.BrandImageJobLog,
-  models.BrandImageStatus,
-  models.BrandJob,
-  models.BrandJobItem,
   models.CategoryImage,
   models.CategoryImageLog,
   models.CategoryImageStatus,
@@ -29,7 +24,6 @@ const storeOwnedModels = [
   models.CategoryJobItem,
   models.CategoryWebhookLog,
   models.ClientPlan,
-  models.HomeBannerImage,
   models.ImageJob,
   models.ImageJobItem,
   models.ImageOldData,
@@ -171,8 +165,6 @@ async function backfillJobs() {
     [models.ImageOptimizationLog, models.ImageJob],
     [models.CategoryJobItem, models.CategoryJob],
     [models.CategoryImageLog, models.CategoryJob],
-    [models.BrandJobItem, models.BrandJob],
-    [models.BrandImageJobLog, models.BrandJob],
   ];
 
   for (const [sourceModel, jobModel] of jobLinks) {
@@ -247,29 +239,6 @@ async function backfillImages() {
     sort: { updated_at: -1, _id: -1 },
     setFields: {
       category_image_id: "$_relation._id",
-      user_id: { $ifNull: ["$user_id", "$_relation.user_id"] },
-    },
-  });
-
-  await mergeLookup({
-    sourceModel: models.BrandImageStatus,
-    targetModel: models.BrandImage,
-    sourceMatch: {
-      $or: [{ brand_image_id: { $exists: false } }, { brand_image_id: null }],
-    },
-    letFields: {
-      storeHash: "$store_hash",
-      brandId: "$brand_id",
-    },
-    matchExpr: {
-      $and: [
-        { $eq: ["$store_hash", "$$storeHash"] },
-        { $eq: ["$brand_id", "$$brandId"] },
-      ],
-    },
-    sort: { updated_at: -1, _id: -1 },
-    setFields: {
-      brand_image_id: "$_relation._id",
       user_id: { $ifNull: ["$user_id", "$_relation.user_id"] },
     },
   });
@@ -401,14 +370,6 @@ async function backfillWebhooks() {
 }
 
 async function createIndexes() {
-  try {
-    await models.HomeBannerImage.collection.dropIndex(
-      "store_hash_1_channel_id_1_widget_uuid_1_image_path_in_config_1"
-    );
-  } catch (error) {
-    if (![26, 27].includes(error?.code)) throw error;
-  }
-
   for (const model of Object.values(models)) {
     if (!model?.createIndexes || !model?.modelName) continue;
     await model.createIndexes();
@@ -418,14 +379,11 @@ async function createIndexes() {
   const obsoleteIndexes = [
     [models.ImageStatus, "store_hash_1_status_1"],
     [models.CategoryImageStatus, "store_hash_1_status_1"],
-    [models.BrandImageStatus, "store_hash_1_status_1"],
     [models.ImageJob, "store_hash_1_status_1"],
     [models.CategoryJob, "store_hash_1_status_1"],
-    [models.BrandJob, "store_hash_1_status_1"],
     [models.ImageJobItem, "job_uuid_1_batch_index_1"],
     [models.ImageJobItem, "job_uuid_1_created_at_1__id_1"],
     [models.CategoryJobItem, "job_uuid_1_created_at_1__id_1"],
-    [models.BrandJobItem, "job_uuid_1_created_at_1__id_1"],
   ];
 
   for (const [model, indexName] of obsoleteIndexes) {

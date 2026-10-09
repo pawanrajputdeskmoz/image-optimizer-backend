@@ -15,9 +15,7 @@ if (envPath) {
 
 const {
   imageOptimizationRoutes,
-  homeImagesRoutes,
   categoryImagesRoutes,
-  brandImagesRoutes,
   installationRoutes,
   settingRoutes,
   adminRoutes,
@@ -41,14 +39,10 @@ async function buildApp() {
 
   await app.register(imageOptimizationRoutes, { prefix: "/api/image-optimizer" });
   await app.register(categoryImagesRoutes, { prefix: "/api/category-images" });
-  await app.register(brandImagesRoutes, { prefix: "/api/brand-images" });
   await app.register(settingRoutes, { prefix: "/api/settings" });
   await app.register(paymentRoutes, { prefix: "/api/payment" });
   await app.register(adminRoutes, { prefix: "/api/admin" });
   await app.register(installationRoutes, { prefix: "/store" });
-  await app.register(homeImagesRoutes, {
-    prefix: "/api/home-images",
-  });
 
   return app;
 }

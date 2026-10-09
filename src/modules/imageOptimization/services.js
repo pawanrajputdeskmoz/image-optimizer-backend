@@ -7,7 +7,6 @@ const ImageStatus = require("../../models/ImageStatus");
 const ImageOptimization = require("../../models/ImageOptimization");
 const ImageOptimizationLog = require("../../models/ImageOptimizationLog");
 const CategoryImageStatus = require("../../models/CategoryImageStatus");
-const BrandImageStatus = require("../../models/BrandImageStatus");
 const {
   normalizeJobType,
   JOB_TYPES,
@@ -23,6 +22,7 @@ const ImageOldData = require("../../models/ImageOldData");
 const StoreImageStat = require("../../models/StoreImageStat");
 const User = require("../../models/User");
 const { get } = require("../../utils/axiosUtils");
+const { resolveChannelId } = require("../../utils/channelContext");
 const { getRedis } = require("../../db/redis");
 const {
   addRestoreJob,
@@ -82,7 +82,7 @@ const bcJsonHeaders = (accessToken) => ({
 /**
  * First DB read in single-image optimize — store feature flags + templates.
  */
-exports.fetchStoreOptimizationSettings = async (storeHash, channelId = 1) => {
+exports.fetchStoreOptimizationSettings = async (storeHash, _channelId = 1) => {
   try {
 
     if (!storeHash) {
@@ -92,15 +92,8 @@ exports.fetchStoreOptimizationSettings = async (storeHash, channelId = 1) => {
       };
     }
 
-    const resolvedChannelId =
-      Number.isFinite(Number(channelId)) && Number(channelId) > 0
-        ? Number(channelId)
-        : 1;
-
-    const doc = await StoreOptimizationSettings.findOne({
-      store_hash: storeHash,
-      channel_id: resolvedChannelId,
-    })
+    // One store → one settings doc (channelId ignored; kept for call-site compat)
+    const doc = await StoreOptimizationSettings.findOne({ store_hash: storeHash })
       .select({
         optimize_image_enabled: 1,
         is_filename_template_enabled: 1,
@@ -975,6 +968,7 @@ exports.streamCatalogFetchToJobItems = async ({
   storeHash,
   accessToken,
   storeUrl,
+  channelId = 1,
   pageSize = config.catalog.pageSize,
   skipOptimized = true,
   maxQueueImages = null,
@@ -1005,6 +999,7 @@ exports.streamCatalogFetchToJobItems = async ({
     };
   }
 
+  const resolvedChannelId = resolveChannelId(channelId, 1);
   const limit = Math.min(
     250,
     Math.max(1, Number(pageSize) || config.catalog.pageSize)
@@ -1050,6 +1045,7 @@ exports.streamCatalogFetchToJobItems = async ({
         limit: String(limit),
         sort: "name",
         direction: sortDirection,
+        "channel_id:in": String(resolvedChannelId),
       });
 
       const response = await fetchCatalogProducts(
@@ -1148,6 +1144,7 @@ exports.streamCatalogFetchToJobItems = async ({
         pendingBatch.push({
           job_uuid: jobUuid,
           store_hash: storeHash,
+          channel_id: resolvedChannelId,
           job_type: "bulk",
           product_id: Number(row.product_id),
           image_id: Number(row.image_id),
@@ -1160,6 +1157,7 @@ exports.streamCatalogFetchToJobItems = async ({
         discoveredForStats.push({
           product_id: Number(row.product_id),
           image_id: Number(row.image_id),
+          channel_id: resolvedChannelId,
         });
 
         if (pendingBatch.length >= batchSize) {
@@ -1186,7 +1184,12 @@ exports.streamCatalogFetchToJobItems = async ({
     await flushBatch();
 
     // Pending = queued only; deferred images are not processed this run.
-    await registerPendingProductImages(storeHash, discoveredForStats, userId);
+    await registerPendingProductImages(
+      storeHash,
+      discoveredForStats,
+      userId,
+      resolvedChannelId
+    );
     await setCatalogImageStats(storeHash, {
       totalCatalogImages,
       userId,
@@ -1203,6 +1206,7 @@ exports.streamCatalogFetchToJobItems = async ({
         quota_deferred_images: quotaDeferredImages,
         quota_capped: quotaDeferredImages > 0,
         page_size: limit,
+        channel_id: resolvedChannelId,
       },
       batchCount: batchIndex,
       queuedImages,
@@ -1237,6 +1241,7 @@ exports.queueOptimizationBatchJobs = async ({
   suppressHeavyWake = false,
   planSlug = null,
   selectedPlan = null,
+  channelId = 1,
 }) => {
   if (!batchCount || batchCount <= 0) {
     return { error: null, results: [], tier: null, queued: 0, duplicates: 0 };
@@ -1268,6 +1273,7 @@ exports.queueOptimizationBatchJobs = async ({
     estimatedImages,
     suppressHeavyWake,
     planSlug: resolvedPlan,
+    channelId,
   });
 };
 
@@ -1290,6 +1296,7 @@ exports.dispatchOptimizationBatch = async ({
   estimatedImages = 0,
   suppressHeavyWake = false,
   planSlug = "free",
+  channelId = null,
 }) => {
   if (!jobUuid || !storeHash) {
     return { error: "jobUuid and storeHash are required", dispatched: false };
@@ -1349,6 +1356,11 @@ exports.dispatchOptimizationBatch = async ({
     suppressHeavyWake,
   };
 
+  const resolvedChannelId = resolveChannelId(
+    channelId ?? job.channel_id,
+    1
+  );
+
   const payload = {
     jobUuid,
     userId: userId || job.user_id || null,
@@ -1363,6 +1375,7 @@ exports.dispatchOptimizationBatch = async ({
     batchIndex,
     selectedPlan: planSlug,
     skipQuotaCheck: true,
+    channelId: resolvedChannelId,
   };
 
   const result = await addOptimizationBatchJob(payload, {}, routing);
@@ -1468,6 +1481,7 @@ exports.handleOptimizationBatchComplete = async (batchJobData = {}) => {
     estimatedImages: job.queued_images,
     suppressHeavyWake: false,
     planSlug,
+    channelId: job.channel_id || batchJobData.channelId || 1,
   });
 
   return {
@@ -1566,9 +1580,15 @@ const SKIP_PENDING_STATUSES = new Set(["optimized", "optimizing", "pending"]);
  * Bulk/single queue: mark images pending for store dashboard.
  * Skips already optimized, optimizing, or already-pending images.
  */
-async function registerPendingProductImages(storeHash, images = [], userId = null) {
+async function registerPendingProductImages(
+  storeHash,
+  images = [],
+  userId = null,
+  channelId = 1
+) {
   if (!storeHash || !images.length) return { registered: 0, error: null };
 
+  const resolvedChannelId = resolveChannelId(channelId, 1);
   const normalized = [];
   const seen = new Set();
 
@@ -1579,7 +1599,14 @@ async function registerPendingProductImages(storeHash, images = [], userId = nul
     const key = `${productId}:${imageId}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    normalized.push({ productId, imageId });
+    normalized.push({
+      productId,
+      imageId,
+      channelId: resolveChannelId(
+        row.channel_id ?? row.channelId,
+        resolvedChannelId
+      ),
+    });
   }
 
   if (!normalized.length) return { registered: 0, error: null };
@@ -1615,6 +1642,7 @@ async function registerPendingProductImages(storeHash, images = [], userId = nul
         update: {
           $set: {
             ...(userId ? { user_id: userId } : {}),
+            channel_id: row.channelId,
             status: "pending",
             image_update_status: "pending",
           },
@@ -1704,11 +1732,10 @@ exports.getStoreDashboardStats = async (storeHash) => {
 
   try {
     const pendingStatusFilter = { store_hash: storeHash, status: { $in: ["pending", "optimizing"] } };
-    const [stat, productPending, categoryPending, brandPending] = await Promise.all([
+    const [stat, productPending, categoryPending] = await Promise.all([
       StoreImageStat.findOne({ store_hash: storeHash }).lean(),
       ImageStatus.countDocuments(pendingStatusFilter),
       CategoryImageStatus.countDocuments(pendingStatusFilter),
-      BrandImageStatus.countDocuments(pendingStatusFilter),
     ]);
     const clamp = (n) => Math.max(0, Number(n) || 0);
     // Live status rows are source of truth for queued/in-flight work.
@@ -1716,8 +1743,7 @@ exports.getStoreDashboardStats = async (storeHash) => {
     // so the dashboard always moves when checkbox optimization registers or finishes.
     const livePending =
       (Number(productPending) || 0) +
-      (Number(categoryPending) || 0) +
-      (Number(brandPending) || 0);
+      (Number(categoryPending) || 0);
     const pendingImages = Number(stat?.pending_images) || 0;
     const dashboardPending = clamp(Math.max(livePending, pendingImages));
 
@@ -1888,6 +1914,7 @@ exports.createBulkOptimizationJob = async ({
   jobUuid = crypto.randomUUID(),
   jobItems = [],
   totalBatches = 0,
+  channelId = 1,
 }) => {
   const validJobType = normalizeJobType(jobType);
   if (!validJobType) {
@@ -1898,11 +1925,14 @@ exports.createBulkOptimizationJob = async ({
     };
   }
 
+  const resolvedChannelId = resolveChannelId(channelId, 1);
+
   try {
     const doc = await ImageJob.create({
       user_id: userId,
       job_uuid: jobUuid,
       store_hash: storeHash,
+      channel_id: resolvedChannelId,
       job_type: validJobType,
       total_images: totalImages,
       queued_images: queuedImages,
@@ -1926,6 +1956,10 @@ exports.createBulkOptimizationJob = async ({
             ...item,
             user_id: userId,
             job_id: doc._id,
+            channel_id: resolveChannelId(
+              item.channel_id ?? item.channelId,
+              resolvedChannelId
+            ),
           })),
           { ordered: false }
         )
@@ -1954,7 +1988,12 @@ exports.createBulkOptimizationJob = async ({
 
     const queuedItems = jobItems.filter((row) => row.status === "queued");
     if (queuedItems.length > 0) {
-      await registerPendingProductImages(storeHash, queuedItems, userId);
+      await registerPendingProductImages(
+        storeHash,
+        queuedItems,
+        userId,
+        resolvedChannelId
+      );
     }
 
     return { error: null, jobUuid, doc };

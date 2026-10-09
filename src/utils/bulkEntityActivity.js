@@ -1,8 +1,7 @@
 const ImageJob = require("../models/ImageJob");
 const CategoryJob = require("../models/CategoryJob");
-const BrandJob = require("../models/BrandJob");
 
-const BULK_ENTITY_TYPES = ["product", "category", "brand"];
+const BULK_ENTITY_TYPES = ["product", "category"];
 const RUNNING_JOB_STATUSES = ["pending", "fetching", "processing"];
 /** Jobs that block a new bulk run — must be actively running, not quota-paused. */
 const BLOCKING_JOB_STATUSES = [...RUNNING_JOB_STATUSES];
@@ -17,13 +16,11 @@ const BULK_RESTORE_JOB_TYPES = ["restore_bulk", "restore_checkbox"];
 const ENTITY_JOB_MODEL = {
   product: ImageJob,
   category: CategoryJob,
-  brand: BrandJob,
 };
 
 const ENTITY_LABELS = {
   product: "Product",
   category: "Category",
-  brand: "Brand",
 };
 
 function isBulkEntityType(entityType) {
@@ -91,14 +88,14 @@ async function getEntityFullBulkBlockActivity(storeHash, entityType) {
 
 async function buildActivityMap(storeHash, checker) {
   if (!storeHash) {
-    return { product: false, category: false, brand: false };
+    return { product: false, category: false };
   }
 
-  const [product, category, brand] = await Promise.all(
+  const [product, category] = await Promise.all(
     BULK_ENTITY_TYPES.map((type) => checker(storeHash, type))
   );
 
-  return { product, category, brand };
+  return { product, category };
 }
 
 async function getActiveBulkOptimizationMap(storeHash) {
@@ -119,7 +116,7 @@ async function getRunningBulkRestoreMap(storeHash) {
 
 async function isAnyBulkOptimizationActive(storeHash) {
   const map = await getActiveBulkOptimizationMap(storeHash);
-  return map.product || map.category || map.brand;
+  return map.product || map.category;
 }
 
 module.exports = {

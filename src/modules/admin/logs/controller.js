@@ -4,6 +4,7 @@ const {
   getLogsSummary,
   getLogTrace,
   getRecentErrorLogs,
+  listSystemErrorLogs,
 } = require("./service");
 const { sendSuccess, sendError } = require("../utils/response");
 
@@ -28,6 +29,7 @@ exports.listLogs = async (req, reply) => {
     job_uuid: jobUuid,
     log_type: logType,
     step,
+    date,
     trace_id: traceId,
   } = req.query || {};
 
@@ -39,6 +41,7 @@ exports.listLogs = async (req, reply) => {
     jobUuid,
     logType,
     step,
+    date,
     traceId,
   });
 
@@ -50,6 +53,23 @@ exports.listLogs = async (req, reply) => {
     message: `${source} logs`,
     data: {
       source: result.source,
+      items: result.items,
+      pagination: result.pagination,
+    },
+  });
+};
+
+exports.listSystemErrorLogs = async (req, reply) => {
+  const { date, page, limit } = req.query || {};
+  const result = await listSystemErrorLogs({ date, page, limit });
+  if (result.error) {
+    return sendError(reply, { message: result.error, statusCode: 400 });
+  }
+  return sendSuccess(reply, {
+    message: "System error logs",
+    data: {
+      date: result.date,
+      file: result.file,
       items: result.items,
       pagination: result.pagination,
     },

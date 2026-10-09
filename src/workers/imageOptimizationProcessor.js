@@ -49,6 +49,7 @@ async function processSingleImageOptimization({
   maxAttempts = 1,
   attemptsMade = 0,
   skipQuotaCheck = false,
+  channelId = 1,
 }) {
   console.log("[image-optimization-worker] process start", {
     jobUuid,
@@ -57,6 +58,7 @@ async function processSingleImageOptimization({
     productId,
     imageId,
     imageUrl,
+    channelId,
     forceReoptimize,
     attemptsMade,
     maxAttempts,
@@ -77,6 +79,7 @@ async function processSingleImageOptimization({
       meta: {
         seq: 4,
         image_url: imageUrl,
+        channel_id: channelId,
         force_reoptimize: forceReoptimize,
         attempts_made: attemptsMade,
         max_attempts: maxAttempts,
@@ -86,8 +89,8 @@ async function processSingleImageOptimization({
 
   const isLastAttempt = attemptsMade + 1 >= maxAttempts;
   const logContext = jobUuid
-    ? { userId, jobId, jobUuid, storeHash, jobType, productId, imageId }
-    : null;
+    ? { userId, jobId, jobUuid, storeHash, jobType, productId, imageId, channelId }
+    : { channelId };
 
   const runOptimize = Boolean(settings?.optimize_image_enabled);
 
@@ -258,6 +261,7 @@ async function processSingleImageOptimization({
       productId,
       imageUrl: resolvedUrl,
       settings,
+      channelId,
       imageMeta: resolvedImageMeta,
       logContext,
       skipQuotaCheck,
@@ -399,11 +403,13 @@ async function processOptimizationBatchJob(job) {
     batchIndex,
     currency = null,
     store_name = null,
+    channelId: channelIdFromData = 1,
   } = job.data;
 
   const jobType = jobTypeFromData || legacyJobType || "bulk";
   const forceReoptimize = Boolean(job.data?.force || job.data?.force_reoptimize);
   const maxAttempts = job.opts?.attempts || getJobAttempts();
+  const batchChannelId = Number(channelIdFromData) > 0 ? Number(channelIdFromData) : 1;
 
   if ((job.attemptsMade || 0) > 0) {
     await ImageJobItem.updateMany(
@@ -531,6 +537,8 @@ async function processOptimizationBatchJob(job) {
           maxAttempts,
           attemptsMade: attempt,
           skipQuotaCheck: Boolean(job.data?.skipQuotaCheck),
+          channelId:
+            Number(item.channel_id) > 0 ? Number(item.channel_id) : batchChannelId,
         });
 
         if (result?.skipped) {
@@ -712,6 +720,7 @@ async function processImageOptimizationJob(job) {
     imageUrl,
     settings,
     imageMeta = {},
+    channelId = 1,
   } = job.data;
 
   const jobType = jobTypeFromData || legacyJobType || "bulk";
@@ -735,6 +744,7 @@ async function processImageOptimizationJob(job) {
     forceReoptimize,
     maxAttempts,
     attemptsMade: job.attemptsMade,
+    channelId,
   });
 }
 

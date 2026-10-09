@@ -10,6 +10,21 @@ const listClientsSchema = {
         type: "string",
         enum: ["installed", "uninstalled", "unknown"],
       },
+      status: {
+        type: "string",
+        enum: [
+          "installed",
+          "uninstalled",
+          "unknown",
+          "active",
+          "trial",
+          "suspended",
+        ],
+      },
+      plan: {
+        type: "string",
+        enum: ["free", "starter", "pro", "enterprise"],
+      },
     },
   },
   response: { 200: successEnvelope },

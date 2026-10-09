@@ -25,6 +25,12 @@ const ImageJobItemSchema = new mongoose.Schema(
       index: true,
     },
 
+    channel_id: {
+      type: Number,
+      default: 1,
+      index: true,
+    },
+
     job_type: {
       type: String,
       enum: JOB_TYPES,

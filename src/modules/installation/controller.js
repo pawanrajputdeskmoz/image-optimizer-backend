@@ -7,6 +7,8 @@ const {
   signAppApiToken,
   resolveStoreUrl,
   fetchStoreInfo,
+  ensureUserStoreUrl,
+  saveSignedPayloadUrl,
 } = require("./services");
 const { trackProductWebhookBurst } = require("../imageOptimization/services");
 const { trackCategoryWebhookBurst } = require("../categoryImages/services");
@@ -132,6 +134,11 @@ exports.installApp = async (req, reply) => {
       storeInfo,
     });
 
+    // Only persist when this callback carried a signed payload (load-style URL).
+    if (req.query?.signed_payload || req.query?.signed_payload_jwt) {
+      await saveSignedPayloadUrl(storeHash, null, req);
+    }
+
     console.log("[install] completed", {
       storeHash,
       storeName: storeInfo.name || null,
@@ -140,12 +147,11 @@ exports.installApp = async (req, reply) => {
 
     // Reinstall-safe: keep existing settings; create defaults only if missing
     await StoreOptimizationSettings.findOneAndUpdate(
-      { store_hash: storeHash, channel_id: 1 },
+      { store_hash: storeHash },
       {
         $setOnInsert: {
           user_id: installedUser._id,
           store_hash: storeHash,
-          channel_id: 1,
           optimize_image_enabled: true,
           is_filename_template_enabled: false,
           filename_template: "[name]",
@@ -247,6 +253,8 @@ exports.uninstallApp = async (req, reply) => {
       }
     );
 
+    await saveSignedPayloadUrl(storeHash, null, req);
+
     queueUninstallNotificationEmail({
       storeName: storeUser?.store_name || null,
       storeHash,
@@ -268,7 +276,7 @@ exports.uninstallApp = async (req, reply) => {
 
 exports.loadBigComApp = async (req, reply) => {
   try {
-    const { signed_payload_jwt } = req.body;
+    const { signed_payload_jwt, signed_payload_url } = req.body;
     console.log("running 11111")
 
     if (!signed_payload_jwt) {
@@ -301,6 +309,9 @@ exports.loadBigComApp = async (req, reply) => {
       });
     }
 
+    // Persist the complete browser callback URL (includes signed_payload query).
+    await saveSignedPayloadUrl(storeHash, signed_payload_url, req);
+
     let syncedUser = userInfo;
 
     try {
@@ -317,6 +328,9 @@ exports.loadBigComApp = async (req, reply) => {
       // Fall back to DB user so email/shop still reach the frontend (localStorage).
       syncedUser = userInfo;
     }
+
+    // Always keep a complete absolute storeUrl in DB (older installs may be empty).
+    syncedUser = (await ensureUserStoreUrl(syncedUser || userInfo)) || syncedUser;
 
     if (!syncedUser) {
       return reply.status(404).send({

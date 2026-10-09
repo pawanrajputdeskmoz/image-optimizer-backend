@@ -23,10 +23,13 @@ const StoreOptimizationSettingsSchema = new mongoose.Schema(
       trim: true,
     },
 
+    /**
+     * Legacy field — settings are store-scoped (one doc per store_hash).
+     * Kept as default 1 for older rows / responses; not used for lookups.
+     */
     channel_id: {
       type: Number,
       default: 1,
-      index: true,
     },
 
     //=======================================================
@@ -156,12 +159,9 @@ const StoreOptimizationSettingsSchema = new mongoose.Schema(
 // Indexes
 //=======================================================
 
+StoreOptimizationSettingsSchema.index({ store_hash: 1 }, { unique: true });
 StoreOptimizationSettingsSchema.index(
-  { store_hash: 1, channel_id: 1 },
-  { unique: true }
-);
-StoreOptimizationSettingsSchema.index(
-  { user_id: 1, channel_id: 1 },
+  { user_id: 1 },
   {
     unique: true,
     partialFilterExpression: { user_id: { $type: "objectId" } },

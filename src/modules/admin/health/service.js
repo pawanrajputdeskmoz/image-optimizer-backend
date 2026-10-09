@@ -3,12 +3,7 @@ const fs = require("node:fs/promises");
 const mongoose = require("mongoose");
 const { getRedis } = require("../../../db/redis");
 const { withTimeout } = require("../../../utils/withTimeout");
-const ImageJobItem = require("../../../models/ImageJobItem");
-const { fetchAllQueueStatsSafe } = require("../workers/service");
 
-const QUEUE_BACKLOG_HIGH_THRESHOLD = 50;
-const RAM_HIGH_THRESHOLD = 85;
-const WORKER_STALE_WAITING_THRESHOLD = 10;
 const REDIS_PING_TIMEOUT_MS = 3000;
 const MONGO_PING_TIMEOUT_MS = 5000;
 
@@ -124,142 +119,21 @@ function getUptimeStats() {
   };
 }
 
-async function buildRecentAlerts({
-  mongodb,
-  redis,
-  queueStats,
-  ramPercentage,
-  stuckOptimizingItems,
-  limit = 10,
-}) {
-  const alerts = [];
-
-  if (!mongodb.ok) {
-    alerts.push({
-      message: "Database connection failed",
-      severity: "high",
-      source: "database",
-    });
-  }
-
-  if (!redis.ok) {
-    alerts.push({
-      message: "Redis connection failed",
-      severity: "high",
-      source: "redis",
-    });
-  }
-
-  let totalPending = 0;
-  let workerNotResponding = false;
-
-  for (const row of queueStats) {
-    if (!row.counts) continue;
-    const waiting = row.counts.waiting || 0;
-    const delayed = row.counts.delayed || 0;
-    const active = row.counts.active || 0;
-    const pending = waiting + delayed;
-    totalPending += pending;
-
-    if (
-      !row.legacy &&
-      pending >= WORKER_STALE_WAITING_THRESHOLD &&
-      active === 0
-    ) {
-      workerNotResponding = true;
-    }
-  }
-
-  if (workerNotResponding) {
-    alerts.push({
-      message: "Worker not responding",
-      severity: "high",
-      source: "workers",
-    });
-  }
-
-  if (totalPending >= QUEUE_BACKLOG_HIGH_THRESHOLD) {
-    alerts.push({
-      message: "Queue backlog high",
-      severity: "medium",
-      source: "queues",
-    });
-  }
-
-  if (ramPercentage >= RAM_HIGH_THRESHOLD) {
-    alerts.push({
-      message: "System RAM usage high",
-      severity: "medium",
-      source: "ram",
-    });
-  }
-
-  if (stuckOptimizingItems > 0) {
-    alerts.push({
-      message: `${stuckOptimizingItems} image(s) stuck in optimizing state`,
-      severity: "medium",
-      source: "image_jobs",
-    });
-  }
-
-  const resolvedLimit = Math.min(Math.max(Number(limit) || 10, 1), 50);
-  return alerts.slice(0, resolvedLimit);
-}
-
-async function collectAlertInputs() {
-  const [mongodb, redis, stuckOptimizingItems] = await Promise.all([
+exports.getServerHealth = async () => {
+  const [mongodb, redis, diskUsagePercent] = await Promise.all([
     checkMongo(),
     checkRedis(),
-    ImageJobItem.countDocuments({ status: "optimizing" }),
-  ]);
-
-  const queueStats = redis.ok ? await fetchAllQueueStatsSafe() : [];
-
-  return {
-    mongodb,
-    redis,
-    queueStats,
-    ramPercentage: getHostRamStats().percentage,
-    stuckOptimizingItems,
-  };
-}
-
-exports.getRecentAlerts = async (limit = 10) => {
-  const inputs = await collectAlertInputs();
-  const recentAlerts = await buildRecentAlerts({ ...inputs, limit });
-  const hasHighSeverity = recentAlerts.some((a) => a.severity === "high");
-
-  return {
-    status: hasHighSeverity ? "degraded" : "ok",
-    checked_at: new Date().toISOString(),
-    recent_alerts: recentAlerts,
-    count: recentAlerts.length,
-    limit: Math.min(Math.max(Number(limit) || 10, 1), 50),
-  };
-};
-
-exports.getServerHealth = async () => {
-  const [inputs, diskUsagePercent] = await Promise.all([
-    collectAlertInputs(),
     getDiskUsagePercent(),
   ]);
 
-  const { mongodb, redis } = inputs;
   const ram = getHostRamStats();
   const apiProcess = getApiProcessStats();
   const uptime = getUptimeStats();
   const healthy = mongodb.ok && redis.ok;
 
-  const recentAlerts = await buildRecentAlerts({
-    ...inputs,
-    ramPercentage: ram.percentage,
-  });
-
   return {
     healthy,
-    status: healthy && recentAlerts.every((a) => a.severity !== "high")
-      ? "ok"
-      : "degraded",
+    status: healthy ? "ok" : "degraded",
     checked_at: new Date().toISOString(),
     server_health: {
       ram,
@@ -273,7 +147,6 @@ exports.getServerHealth = async () => {
       mongodb,
       redis,
     },
-    recent_alerts: recentAlerts,
     process: {
       node_version: process.version,
       pid: process.pid,

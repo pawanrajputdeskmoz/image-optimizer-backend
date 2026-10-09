@@ -13,6 +13,12 @@ const ImageOptimizationSchema = new mongoose.Schema(
       index: true,
     },
 
+    channel_id: {
+      type: Number,
+      default: 1,
+      index: true,
+    },
+
     product_id: {
       type: Number,
       required: true,

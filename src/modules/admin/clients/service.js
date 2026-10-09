@@ -5,6 +5,8 @@ const StoreImageStat = require("../../../models/StoreImageStat");
 const StoreOptimizationSettings = require("../../../models/StoreOptimizationSettings");
 const StoreWebhook = require("../../../models/StoreWebhook");
 const StoreCategoryWebhook = require("../../../models/StoreCategoryWebhook");
+const ClientPlan = require("../../../models/ClientPlan");
+const PaymentHistory = require("../../../models/PaymentHistory");
 const User = require("../../../models/User");
 const { getOptimizationJobStatus } = require("../../imageOptimization/services");
 const {
@@ -16,6 +18,10 @@ const {
   listPlans,
 } = require("../../plans/service");
 const { buildPagination, resolvePagination } = require("../utils/pagination");
+const {
+  resolveStoreUrl,
+  normalizeAbsoluteStoreUrl,
+} = require("../../installation/services");
 
 const CLIENT_PROFILE_FIELDS = {
   store_hash: 1,
@@ -35,7 +41,11 @@ const CLIENT_PROFILE_FIELDS = {
   lastLogin: 1,
   created_at: 1,
   updated_at: 1,
+  signed_payload_url: 1,
 };
+
+const PLAN_SLUGS = ["free", "starter", "pro", "enterprise"];
+const ACTIVE_JOB_STATUSES = ["pending", "fetching", "processing"];
 
 function formatClientProfile(user) {
   if (!user) return null;
@@ -46,20 +56,260 @@ function formatClientProfile(user) {
   return profile;
 }
 
+function normalizePlanSlug(slug) {
+  const value = String(slug || "free").trim().toLowerCase();
+  return PLAN_SLUGS.includes(value) ? value : "free";
+}
+
+function mapClientUiStatus(installStatus, planSlug) {
+  if (installStatus === "uninstalled") return "suspended";
+  if (installStatus === "installed" && planSlug === "free") return "trial";
+  if (installStatus === "installed") return "active";
+  return "suspended";
+}
+
+function mapStatusFilterToInstall(status) {
+  if (status === "installed" || status === "active" || status === "trial") {
+    return "installed";
+  }
+  if (status === "uninstalled" || status === "suspended") return "uninstalled";
+  if (status === "unknown") return "unknown";
+  return null;
+}
+
+function toIso(value) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function addOneMonth(value) {
+  const date = value instanceof Date ? new Date(value) : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  date.setUTCMonth(date.getUTCMonth() + 1);
+  return date;
+}
+
+function resolveNextPaymentAt({
+  planSlug,
+  subscriptionStatus,
+  lastPaymentAt,
+  startedAt,
+}) {
+  if (!planSlug || planSlug === "free") return null;
+  if (subscriptionStatus === "cancel") return null;
+  const base = lastPaymentAt || startedAt;
+  if (!base) return null;
+  return addOneMonth(base);
+}
+
+async function resolveStoreHashesForPlan(planSlug) {
+  const slug = normalizePlanSlug(planSlug);
+  const assigned = await ClientPlan.find({ base_plan_slug: slug })
+    .select({ store_hash: 1 })
+    .lean();
+  const assignedHashes = assigned.map((row) => row.store_hash).filter(Boolean);
+
+  if (slug !== "free") {
+    return assignedHashes;
+  }
+
+  const otherPlans = await ClientPlan.find({
+    base_plan_slug: { $ne: "free" },
+  })
+    .select({ store_hash: 1 })
+    .lean();
+  const otherHashes = otherPlans.map((row) => row.store_hash).filter(Boolean);
+
+  const freeUsers = await User.find(
+    otherHashes.length
+      ? { store_hash: { $nin: otherHashes } }
+      : {}
+  )
+    .select({ store_hash: 1 })
+    .lean();
+
+  return freeUsers.map((row) => row.store_hash).filter(Boolean);
+}
+
+async function enrichClientRows(clients) {
+  if (!clients.length) return [];
+
+  const hashes = clients.map((c) => c.store_hash).filter(Boolean);
+  const [statsRows, planRows, pendingRows, paymentRows] = await Promise.all([
+    StoreImageStat.find({ store_hash: { $in: hashes } }).lean(),
+    ClientPlan.find({ store_hash: { $in: hashes } })
+      .select({
+        store_hash: 1,
+        base_plan_slug: 1,
+        started_at: 1,
+        subscription_status: 1,
+        paypal_subscription_id: 1,
+      })
+      .lean(),
+    ImageJob.aggregate([
+      {
+        $match: {
+          store_hash: { $in: hashes },
+          status: { $in: ACTIVE_JOB_STATUSES },
+        },
+      },
+      { $group: { _id: "$store_hash", count: { $sum: 1 } } },
+    ]),
+    PaymentHistory.aggregate([
+      {
+        $match: {
+          store_hash: { $in: hashes },
+          status: "COMPLETED",
+        },
+      },
+      { $sort: { paid_at: -1, created_at: -1 } },
+      {
+        $group: {
+          _id: "$store_hash",
+          paid_at: { $first: "$paid_at" },
+          created_at: { $first: "$created_at" },
+        },
+      },
+    ]),
+  ]);
+
+  const statsByHash = new Map(statsRows.map((row) => [row.store_hash, row]));
+  const planByHash = new Map(planRows.map((row) => [row.store_hash, row]));
+  const pendingByHash = new Map(
+    pendingRows.map((row) => [row._id, row.count || 0])
+  );
+  const paymentByHash = new Map(
+    paymentRows.map((row) => [
+      row._id,
+      row.paid_at || row.created_at || null,
+    ])
+  );
+
+  return clients.map((user) => {
+    const stats = statsByHash.get(user.store_hash) || {};
+    const planRow = planByHash.get(user.store_hash) || {};
+    const plan = normalizePlanSlug(planRow.base_plan_slug);
+    const lastPaymentAt = paymentByHash.get(user.store_hash) || null;
+    const nextPaymentAt = resolveNextPaymentAt({
+      planSlug: plan,
+      subscriptionStatus: planRow.subscription_status || null,
+      lastPaymentAt,
+      startedAt: planRow.started_at || null,
+    });
+    const storeUrl = normalizeAbsoluteStoreUrl(
+      user.storeUrl ||
+        (user.primaryDomain
+          ? `https://${String(user.primaryDomain).replace(/^https?:\/\//i, "")}`
+          : null),
+      user.store_hash
+    ) || resolveStoreUrl(
+      { secure_url: user.storeUrl, domain: user.primaryDomain },
+      user.store_hash
+    );
+
+    return {
+      _id: String(user._id || user.store_hash),
+      store_hash: user.store_hash,
+      store_name: user.store_name || user.store_hash || "Unknown store",
+      store_url: storeUrl,
+      app_url: storeUrl,
+      signed_payload_url: user.signed_payload_url || null,
+      platform: user.provider || "BigCommerce",
+      plan,
+      status: mapClientUiStatus(user.installStatus, plan),
+      install_status: user.installStatus || "unknown",
+      owner_email: user.email || "",
+      installed_at: toIso(user.lastInstalledAt || user.created_at || null),
+      last_payment_at: toIso(lastPaymentAt),
+      next_payment_at: toIso(nextPaymentAt),
+      paypal_subscription_id: planRow.paypal_subscription_id || null,
+      subscription_status: planRow.subscription_status || null,
+      last_active_at: toIso(
+        user.lastLogin || user.updated_at || user.created_at || null
+      ),
+      channel_count: 1,
+      total_images: Number(stats.total_catalog_images) || 0,
+      optimized_images: Number(stats.optimized_images) || 0,
+      failed_images: Number(stats.failed_images) || 0,
+      pending_images: Number(stats.pending_images) || 0,
+      total_saved_size: Number(stats.total_saved_bytes) || 0,
+      average_compression_percent: Number(
+        Number(stats.average_saving_percent || 0).toFixed(2)
+      ),
+      pending_jobs: pendingByHash.get(user.store_hash) || 0,
+    };
+  });
+}
+
+async function buildClientsSummary(baseFilter) {
+  const [totalClients, activeCount, planDocs, allUsers, savedAgg] =
+    await Promise.all([
+      User.countDocuments(baseFilter),
+      User.countDocuments({ ...baseFilter, installStatus: "installed" }),
+      ClientPlan.find({}).select({ store_hash: 1, base_plan_slug: 1 }).lean(),
+      User.find(baseFilter).select({ store_hash: 1, installStatus: 1 }).lean(),
+      StoreImageStat.aggregate([
+        {
+          $group: {
+            _id: null,
+            total_saved_bytes: { $sum: "$total_saved_bytes" },
+            optimized_images: { $sum: "$optimized_images" },
+          },
+        },
+      ]),
+    ]);
+
+  const planByHash = new Map(
+    planDocs.map((row) => [row.store_hash, normalizePlanSlug(row.base_plan_slug)])
+  );
+
+  const planBreakdown = Object.fromEntries(PLAN_SLUGS.map((slug) => [slug, 0]));
+  let trialCount = 0;
+
+  for (const user of allUsers) {
+    const plan = planByHash.get(user.store_hash) || "free";
+    planBreakdown[plan] = (planBreakdown[plan] || 0) + 1;
+    if (user.installStatus === "installed" && plan === "free") {
+      trialCount += 1;
+    }
+  }
+
+  const totals = savedAgg[0] || {};
+
+  return {
+    total_clients: totalClients,
+    active: activeCount,
+    trial: trialCount,
+    total_saved_bytes: Number(totals.total_saved_bytes) || 0,
+    total_optimized_images: Number(totals.optimized_images) || 0,
+    plan_breakdown: PLAN_SLUGS.map((slug) => ({
+      name: slug,
+      value: planBreakdown[slug] || 0,
+    })),
+  };
+}
+
 exports.listClients = async ({
   page = 1,
   limit = 20,
   search = "",
   installStatus = null,
+  status = null,
+  plan = null,
 }) => {
   const { page: resolvedPage, limit: resolvedLimit, skip } = resolvePagination(
     { page, limit }
   );
 
   const filter = {};
-  if (installStatus) {
-    filter.installStatus = installStatus;
+  const resolvedInstall =
+    installStatus || mapStatusFilterToInstall(status) || null;
+
+  if (resolvedInstall) {
+    filter.installStatus = resolvedInstall;
   }
+
   if (search && String(search).trim()) {
     const term = String(search).trim();
     filter.$or = [
@@ -69,7 +319,49 @@ exports.listClients = async ({
     ];
   }
 
-  const [clients, total] = await Promise.all([
+  if (plan) {
+    const planHashes = await resolveStoreHashesForPlan(plan);
+    filter.store_hash = { $in: planHashes.length ? planHashes : ["__none__"] };
+  }
+
+  // Trial = installed free-plan stores.
+  if (status === "trial") {
+    const freeHashes = await resolveStoreHashesForPlan("free");
+    const existing = filter.store_hash?.$in;
+    const merged = existing
+      ? freeHashes.filter((hash) => existing.includes(hash))
+      : freeHashes;
+    filter.store_hash = { $in: merged.length ? merged : ["__none__"] };
+    filter.installStatus = "installed";
+  }
+
+  // Active = installed paid-plan stores.
+  if (status === "active") {
+    const nonFreePlans = await ClientPlan.find({
+      base_plan_slug: { $ne: "free" },
+    })
+      .select({ store_hash: 1 })
+      .lean();
+    const paidHashes = nonFreePlans.map((row) => row.store_hash).filter(Boolean);
+    const existing = filter.store_hash?.$in;
+    const merged = existing
+      ? paidHashes.filter((hash) => existing.includes(hash))
+      : paidHashes;
+    filter.store_hash = { $in: merged.length ? merged : ["__none__"] };
+    filter.installStatus = "installed";
+  }
+
+  const summaryFilter = {};
+  if (search && String(search).trim()) {
+    const term = String(search).trim();
+    summaryFilter.$or = [
+      { store_hash: { $regex: term, $options: "i" } },
+      { store_name: { $regex: term, $options: "i" } },
+      { email: { $regex: term, $options: "i" } },
+    ];
+  }
+
+  const [clients, total, summary] = await Promise.all([
     User.find(filter)
       .select(CLIENT_PROFILE_FIELDS)
       .sort({ created_at: -1 })
@@ -77,11 +369,13 @@ exports.listClients = async ({
       .limit(resolvedLimit)
       .lean(),
     User.countDocuments(filter),
+    buildClientsSummary(summaryFilter),
   ]);
 
   return {
-    clients: clients.map(formatClientProfile),
+    clients: await enrichClientRows(clients),
     pagination: buildPagination(resolvedPage, resolvedLimit, total),
+    summary,
   };
 };
 
@@ -107,9 +401,7 @@ exports.getClientInformation = async (storeHash) => {
     totalJobs,
   ] = await Promise.all([
     StoreImageStat.findOne({ store_hash: storeHash }).lean(),
-    StoreOptimizationSettings.find({ store_hash: storeHash })
-      .sort({ channel_id: 1 })
-      .lean(),
+    StoreOptimizationSettings.findOne({ store_hash: storeHash }).lean(),
     StoreWebhook.find({ store_hash: storeHash })
       .select({
         hook_id: 1,
@@ -187,7 +479,7 @@ exports.getClientInformation = async (storeHash) => {
     data: {
       profile: formatClientProfile(client),
       stats: stats || null,
-      settings: settings || [],
+      settings: settings ? [settings] : [],
       webhooks: {
         product: productWebhooks,
         category: categoryWebhooks,
@@ -211,29 +503,49 @@ exports.getClientInformation = async (storeHash) => {
 };
 
 exports.getClientDetail = async (storeHash) => {
-  const [client, stats, recentJobs] = await Promise.all([
-    User.findOne({ store_hash: storeHash })
-      .select(CLIENT_PROFILE_FIELDS)
-      .lean(),
-    StoreImageStat.findOne({ store_hash: storeHash }).lean(),
-    ImageJob.find({ store_hash: storeHash })
-      .sort({ created_at: -1 })
-      .limit(10)
-      .lean(),
-  ]);
+  const client = await User.findOne({ store_hash: storeHash })
+    .select({ ...CLIENT_PROFILE_FIELDS, access_token: 1 })
+    .lean();
 
   if (!client) {
     return { error: "Client not found", client: null };
   }
 
-  const jobCounts = await ImageJob.aggregate([
-    { $match: { store_hash: storeHash } },
-    { $group: { _id: "$status", count: { $sum: 1 } } },
+  const [enriched] = await enrichClientRows([client]);
+  const latestPayment = await PaymentHistory.findOne({
+    store_hash: storeHash,
+    status: "COMPLETED",
+    $or: [
+      { transaction_id: { $type: "string", $ne: "" } },
+      { capture_id: { $type: "string", $ne: "" } },
+    ],
+  })
+    .sort({ paid_at: -1, created_at: -1 })
+    .select({ transaction_id: 1, capture_id: 1 })
+    .lean();
+
+  const detail = {
+    ...(enriched || {}),
+    access_token: client.access_token || null,
+    transaction_id:
+      latestPayment?.transaction_id || latestPayment?.capture_id || null,
+  };
+
+  const [stats, recentJobs, jobCounts] = await Promise.all([
+    StoreImageStat.findOne({ store_hash: storeHash }).lean(),
+    ImageJob.find({ store_hash: storeHash })
+      .sort({ created_at: -1 })
+      .limit(10)
+      .lean(),
+    ImageJob.aggregate([
+      { $match: { store_hash: storeHash } },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]),
   ]);
 
   return {
     error: null,
-    client: formatClientProfile(client),
+    client: detail,
     stats,
     recent_jobs: recentJobs,
     jobs_by_status: Object.fromEntries(

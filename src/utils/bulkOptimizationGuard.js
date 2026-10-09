@@ -14,7 +14,6 @@ const {
 const ENTITY_LABELS_LOWER = {
   product: "product",
   category: "category",
-  brand: "brand",
 };
 
 function isBulkOptimizationJobType(jobType) {

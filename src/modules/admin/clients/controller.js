@@ -12,8 +12,31 @@ const {
 const { sendSuccess, sendError } = require("../utils/response");
 
 exports.listClients = async (req, reply) => {
-  const { page, limit, search, install_status: installStatus } = req.query || {};
-  const data = await listClients({ page, limit, search, installStatus });
+  const {
+    page,
+    limit,
+    search,
+    install_status: installStatus,
+    status,
+    plan,
+  } = req.query || {};
+  const data = await listClients({
+    page,
+    limit,
+    search,
+    installStatus,
+    status,
+    plan,
+  });
+  // DEBUG: confirm field before serialize
+  console.log(
+    "[admin/clients] signed_payload sample",
+    (data.clients || []).map((c) => ({
+      h: c.store_hash,
+      has: Boolean(c.signed_payload_url),
+      keysHas: Object.prototype.hasOwnProperty.call(c, "signed_payload_url"),
+    }))
+  );
   return sendSuccess(reply, { message: "Clients list", data });
 };
 

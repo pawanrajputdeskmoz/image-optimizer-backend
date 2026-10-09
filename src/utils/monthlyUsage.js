@@ -3,14 +3,10 @@ const ClientPlan = require("../models/ClientPlan");
 const Plan = require("../models/Plan");
 const ImageStatus = require("../models/ImageStatus");
 const CategoryImageStatus = require("../models/CategoryImageStatus");
-const BrandImageStatus = require("../models/BrandImageStatus");
-const HomeBannerImage = require("../models/HomeBannerImage");
 
 const TYPE_COUNT_FIELDS = {
   product: "product_count",
   category: "category_count",
-  brand: "brand_count",  
-  home_banner: "home_banner_count",
 };
 
 function getMonthStart(date = new Date()) {
@@ -67,7 +63,7 @@ async function resolveStorePlanSnapshot(storeHash) {
 }
 
 async function countLegacyMonthlyOptimized(storeHash, monthStart) {
-  const [products, categories, brands, homeBanners] = await Promise.all([
+  const [products, categories] = await Promise.all([
     ImageStatus.countDocuments({
       store_hash: storeHash,
       status: "optimized",
@@ -78,24 +74,14 @@ async function countLegacyMonthlyOptimized(storeHash, monthStart) {
       status: "optimized",
       optimized_at: { $gte: monthStart },
     }),
-    BrandImageStatus.countDocuments({
-      store_hash: storeHash,
-      status: "optimized",
-      optimized_at: { $gte: monthStart },
-    }),
-    HomeBannerImage.countDocuments({
-      store_hash: storeHash,
-      optimization_status: "optimized",
-      last_optimized_at: { $gte: monthStart },
-    }),
   ]);
 
   return {
-    images_optimized: products + categories + brands + homeBanners,
+    images_optimized: products + categories,
     product_count: products,
     category_count: categories,
-    brand_count: brands,
-    home_banner_count: homeBanners,
+    brand_count: 0,
+    home_banner_count: 0,
   };
 }
 

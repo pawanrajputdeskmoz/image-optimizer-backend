@@ -10,7 +10,6 @@ const ClientPlan = require("../../models/ClientPlan");
 const ImageStatus = require("../../models/ImageStatus");
 const ImageJob = require("../../models/ImageJob");
 const CategoryJob = require("../../models/CategoryJob");
-const BrandJob = require("../../models/BrandJob");
 const {
   getStoreDashboardStats,
   getStoreActiveBulkJobs,
@@ -60,14 +59,13 @@ async function sumPendingRestoreForModel(Model, storeHash) {
   return clampCount(rows[0]?.pending);
 }
 
-/** Pending restore images across product/category/brand active restore jobs. */
+/** Pending restore images across product/category active restore jobs. */
 async function getPendingRestoreImagesCount(storeHash) {
-  const [product, category, brand] = await Promise.all([
+  const [product, category] = await Promise.all([
     sumPendingRestoreForModel(ImageJob, storeHash),
     sumPendingRestoreForModel(CategoryJob, storeHash),
-    sumPendingRestoreForModel(BrandJob, storeHash),
   ]);
-  return product + category + brand;
+  return product + category;
 }
 
 function formatCountDisplay(value) {
@@ -284,12 +282,10 @@ exports.getClientDashboardStats = async (storeHash, selectedPlan = null) => {
         active_bulk_jobs: activeBulkData?.active_bulk_jobs || {
           product: false,
           category: false,
-          brand: false,
         },
         active_bulk_restores: activeBulkData?.active_bulk_restores || {
           product: false,
           category: false,
-          brand: false,
         },
         paused_plan_limit: pausedPlanJobs > 0,
         paused_plan_jobs: pausedPlanJobs,
@@ -449,7 +445,7 @@ function mapHookToDbEntry(hook, scope, destination) {
 
 async function syncAutoOptimizeFlag(storeHash, enabled, userId = null) {
   await StoreOptimizationSettings.findOneAndUpdate(
-    { store_hash: storeHash, channel_id: 1 },
+    { store_hash: storeHash },
     {
       $set: {
         ...(userId ? { user_id: userId } : {}),
@@ -462,7 +458,7 @@ async function syncAutoOptimizeFlag(storeHash, enabled, userId = null) {
 
 async function syncCategoryAutoOptimizeFlag(storeHash, enabled, userId = null) {
   await StoreOptimizationSettings.findOneAndUpdate(
-    { store_hash: storeHash, channel_id: 1 },
+    { store_hash: storeHash },
     {
       $set: {
         ...(userId ? { user_id: userId } : {}),

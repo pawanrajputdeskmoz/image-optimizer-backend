@@ -24,13 +24,35 @@ exports.fetchStoreInfo = async (storeHash, accessToken) => {
   }
 };
 
+/** Always return a full absolute storefront URL (https://..., no trailing slash). */
+exports.normalizeAbsoluteStoreUrl = (raw, storeHash) => {
+  const fallback = storeHash
+    ? `https://store-${storeHash}.mybigcommerce.com`
+    : null;
+
+  if (raw == null || typeof raw !== "string") {
+    return fallback;
+  }
+
+  let url = raw.trim().replace(/\/$/, "");
+  if (!url) return fallback;
+
+  if (url.startsWith("//")) {
+    url = `https:${url}`;
+  } else if (!/^https?:\/\//i.test(url)) {
+    url = `https://${url.replace(/^\/+/, "")}`;
+  }
+
+  return url.replace(/\/$/, "") || fallback;
+};
+
 exports.resolveStoreUrl = (storeInfo, storeHash) => {
   const secureUrl =
     typeof storeInfo?.secure_url === "string"
-      ? storeInfo.secure_url.trim().replace(/\/$/, "")
+      ? storeInfo.secure_url.trim()
       : "";
   if (secureUrl) {
-    return secureUrl;
+    return exports.normalizeAbsoluteStoreUrl(secureUrl, storeHash);
   }
 
   const domain =
@@ -38,22 +60,32 @@ exports.resolveStoreUrl = (storeInfo, storeHash) => {
       ? storeInfo.domain.trim().replace(/^https?:\/\//i, "").replace(/\/$/, "")
       : "";
   if (domain) {
-    return `https://${domain}`;
+    return exports.normalizeAbsoluteStoreUrl(`https://${domain}`, storeHash);
   }
 
-  return `https://store-${storeHash}.mybigcommerce.com`;
+  return exports.normalizeAbsoluteStoreUrl(null, storeHash);
 };
 
 exports.buildStoreUpdateFields = (storeInfo, storeHash) => {
   const storeUrl = exports.resolveStoreUrl(storeInfo, storeHash);
-  const primaryDomain =
+  const primaryDomainFromInfo =
     typeof storeInfo?.domain === "string"
       ? storeInfo.domain
-        .trim()
-        .replace(/^https?:\/\//i, "")
-        .replace(/\/$/, "")
-        .toLowerCase()
+          .trim()
+          .replace(/^https?:\/\//i, "")
+          .replace(/\/$/, "")
+          .toLowerCase()
       : null;
+
+  let primaryDomain = primaryDomainFromInfo;
+  if (!primaryDomain && storeUrl) {
+    try {
+      primaryDomain = new URL(storeUrl).hostname.toLowerCase();
+    } catch {
+      primaryDomain = null;
+    }
+  }
+
   const storeName =
     typeof storeInfo?.name === "string" ? storeInfo.name.trim() : null;
   const currency =
@@ -68,6 +100,49 @@ exports.buildStoreUpdateFields = (storeInfo, storeHash) => {
     ...(primaryDomain ? { primaryDomain } : {}),
     ...(storeInfo?.id != null ? { store_id: String(storeInfo.id) } : {}),
   };
+};
+
+/** Persist a complete storeUrl when missing (e.g. older installs). */
+exports.ensureUserStoreUrl = async (userDoc) => {
+  if (!userDoc?.store_hash) return userDoc;
+
+  const existing = exports.normalizeAbsoluteStoreUrl(
+    userDoc.storeUrl,
+    userDoc.store_hash
+  );
+  if (userDoc.storeUrl && userDoc.storeUrl === existing) {
+    return userDoc;
+  }
+
+  const nextUrl =
+    existing ||
+    exports.resolveStoreUrl(
+      { domain: userDoc.primaryDomain, secure_url: userDoc.storeUrl },
+      userDoc.store_hash
+    );
+
+  if (!nextUrl) return userDoc;
+
+  return User.findOneAndUpdate(
+    { store_hash: userDoc.store_hash },
+    {
+      $set: {
+        storeUrl: nextUrl,
+        ...(userDoc.primaryDomain
+          ? {}
+          : {
+              primaryDomain: (() => {
+                try {
+                  return new URL(nextUrl).hostname.toLowerCase();
+                } catch {
+                  return null;
+                }
+              })(),
+            }),
+      },
+    },
+    { returnDocument: "after" }
+  ).lean();
 };
 
 exports.syncUserStoreFromBigCommerce = async (storeHash, accessToken) => {
@@ -154,6 +229,46 @@ exports.saveInstalledStore = async ({
 
 exports.getManageAppRedirectUrl = (storeHash) =>
   `https://store-${storeHash}.mybigcommerce.com/manage/app/${process.env.BIG_COMMERCE_APP_ID}`;
+
+/** Absolute callback URL from a Fastify request (supports proxies). */
+exports.buildAbsoluteRequestUrl = (req) => {
+  if (!req) return null;
+
+  const forwardedHost = req.headers?.["x-forwarded-host"];
+  const host = String(forwardedHost || req.headers?.host || "")
+    .split(",")[0]
+    .trim();
+  const forwardedProto = req.headers?.["x-forwarded-proto"];
+  const proto = String(forwardedProto || req.protocol || "https")
+    .split(",")[0]
+    .trim()
+    .replace(/:$/, "");
+  const pathWithQuery = req.raw?.url || req.url || "";
+
+  if (!host || !pathWithQuery) return null;
+  return `${proto}://${host}${pathWithQuery}`;
+};
+
+/**
+ * Persist the complete signed-payload callback URL on the store user.
+ * Accepts either an explicit URL (preferred from frontend) or builds from req.
+ */
+exports.saveSignedPayloadUrl = async (storeHash, url, req = null) => {
+  if (!storeHash) return null;
+
+  const resolved =
+    (typeof url === "string" && url.trim()) ||
+    exports.buildAbsoluteRequestUrl(req) ||
+    null;
+
+  if (!resolved) return null;
+
+  return User.findOneAndUpdate(
+    { store_hash: storeHash },
+    { $set: { signed_payload_url: resolved } },
+    { returnDocument: "after" }
+  ).lean();
+};
 
 exports.verifySignedPayloadJwt = (signedPayloadJwt, options = {}) =>
   jwt.verify(signedPayloadJwt, process.env.BIG_COMMERCE_CLIENT_SECRET, {

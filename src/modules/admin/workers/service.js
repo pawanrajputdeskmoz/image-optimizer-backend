@@ -21,8 +21,6 @@ const WORKER_QUEUES = [
   { name: "image-restore", category: "product_restore", legacy: true },
   { name: "category-image-optimization", category: "category" },
   { name: "category-image-restore", category: "category" },
-  { name: "brand-image-optimization", category: "brand" },
-  { name: "brand-image-restore", category: "brand" },
 ];
 
 let queueConnection = null;
@@ -200,70 +198,9 @@ function resolveWorkerScriptHint(queueName) {
     "image-restore-3": "worker:image-restore-3",
     "category-image-optimization": "worker:category-image",
     "category-image-restore": "worker:category-image-restore",
-    "brand-image-optimization": "worker:brand-image",
-    "brand-image-restore": "worker:brand-image-restore",
   };
   return map[queueName] || null;
 }
-
-exports.getWorkersOverview = async () => {
-  const queueStats = await Promise.all(
-    WORKER_QUEUES.map((meta) =>
-      getQueueStats(meta).catch((err) => ({
-        queue: meta.name,
-        category: meta.category,
-        legacy: Boolean(meta.legacy),
-        error: err?.message || "Failed to read queue stats",
-        counts: null,
-        backlog: null,
-        healthy: false,
-      }))
-    )
-  );
-
-  const totals = queueStats.reduce(
-    (acc, row) => {
-      if (!row.counts) return acc;
-      acc.waiting += row.counts.waiting || 0;
-      acc.active += row.counts.active || 0;
-      acc.failed += row.counts.failed || 0;
-      acc.delayed += row.counts.delayed || 0;
-      acc.backlog += row.backlog || 0;
-      return acc;
-    },
-    { waiting: 0, active: 0, failed: 0, delayed: 0, backlog: 0 }
-  );
-
-  let redisOk = false;
-  try {
-    redisOk = await isRedisReachable();
-  } catch {
-    redisOk = false;
-  }
-
-  return {
-    redis_connected: redisOk,
-    totals,
-    queues: queueStats,
-    worker_processes: WORKER_QUEUES.filter((q) => !q.legacy).map((q) => ({
-      queue: q.name,
-      category: q.category,
-      npm_script_hint: resolveWorkerScriptHint(q.name),
-    })),
-  };
-};
-
-exports.getQueueDetail = async (queueName) => {
-  const meta = WORKER_QUEUES.find((q) => q.name === queueName);
-  if (!meta) {
-    return { error: "Queue not found", queue: null };
-  }
-
-  const stats = await getQueueStats(meta);
-  return { error: null, queue: stats };
-};
-
-exports.listKnownQueues = () => WORKER_QUEUES.map((q) => q.name);
 
 exports.fetchAllQueueStats = async () => {
   return Promise.all(
@@ -303,5 +240,3 @@ exports.getWorkerStatusSummary = async () => {
   const queueStats = await exports.fetchAllQueueStatsSafe();
   return buildWorkerStatusSummary(queueStats);
 };
-
-exports.getWorkerQueueDefinitions = () => WORKER_QUEUES;

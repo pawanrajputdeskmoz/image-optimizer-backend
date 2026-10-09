@@ -73,6 +73,18 @@ const UserSchema = new mongoose.Schema(
       trim: true,
       default: null,
     },
+
+    /**
+     * Full BigCommerce callback URL that included signed_payload /
+     * signed_payload_jwt (e.g. frontend /install?... or /store/uninstall?...).
+     * Kept for direct logging / support debugging.
+     */
+    signed_payload_url: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+
     lastInstalledAt: {
       type: Date,
       default: null,

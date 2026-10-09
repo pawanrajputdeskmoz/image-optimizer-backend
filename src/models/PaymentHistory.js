@@ -60,6 +60,13 @@ const PaymentHistorySchema = new mongoose.Schema(
     capture_id: {
       type: String,
       default: null,
+      index: true,
+    },
+    /** PayPal sale/capture transaction id for this charge. */
+    transaction_id: {
+      type: String,
+      default: null,
+      index: true,
     },
     payer_id: {
       type: String,
@@ -89,6 +96,13 @@ const PaymentHistorySchema = new mongoose.Schema(
 );
 
 PaymentHistorySchema.index({ store_hash: 1, created_at: -1 });
+PaymentHistorySchema.index(
+  { transaction_id: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { transaction_id: { $type: "string" } },
+  }
+);
 PaymentHistorySchema.index(
   { user_id: 1, created_at: -1 },
   { partialFilterExpression: { user_id: { $type: "objectId" } } }

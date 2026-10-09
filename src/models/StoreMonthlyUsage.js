@@ -1,6 +1,6 @@
 const mongoose = require("mongoose");
 
-const IMAGE_TYPES = ["product", "category", "brand", "home_banner"];
+const IMAGE_TYPES = ["product", "category"];
 
 const StoreMonthlyUsageSchema = new mongoose.Schema(
   {

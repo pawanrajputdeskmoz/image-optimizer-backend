@@ -28,11 +28,6 @@ async function connectMongo() {
 
     isConnected = true;
 
-    const { HomeBannerImage } = require("../models");
-    if (autoIndex && HomeBannerImage?.syncModelIndexes) {
-      await HomeBannerImage.syncModelIndexes();
-    }
-
     const { ensureDefaultPlans } = require("../modules/plans/service");
     await ensureDefaultPlans();
 

@@ -11,9 +11,19 @@ function parseChannelId(source) {
   return Number.isFinite(channelId) && channelId > 0 ? channelId : null;
 }
 
+/** Coerce a raw channel id; falls back when missing/invalid. */
+function resolveChannelId(value, fallback = 1) {
+  const channelId = Number(value);
+  if (Number.isFinite(channelId) && channelId > 0) {
+    return channelId;
+  }
+  const fallbackId = Number(fallback);
+  return Number.isFinite(fallbackId) && fallbackId > 0 ? fallbackId : 1;
+}
+
 function normalizeImageFile(value) {
   if (value == null || value === "") return value;
-
+  
   const str = String(value).trim();
   if (!/^https?:\/\//i.test(str)) return str;
 
@@ -42,6 +52,7 @@ async function resolveChannelSiteUrl(storeHash, channelId, accessToken, fallback
 
 module.exports = {
   parseChannelId,
+  resolveChannelId,
   normalizeImageFile,
   resolveChannelSiteUrl,
 };

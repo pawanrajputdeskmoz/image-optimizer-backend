@@ -135,24 +135,26 @@ function registerRequestLogger(app) {
   app.addHook("onResponse", async (request, reply) => {
     if (shouldSkip(request.url)) return;
     const startedAt = request.logContext?.startedAt || Date.now();
-    logRequestEnd({
+    const details = {
       method: request.method,
       url: request.url,
       statusCode: reply.statusCode,
       durationMs: Date.now() - startedAt,
       requestId: request.requestId,
       responseData: request.logContext?.responseData,
-    });
+      error: request.logContext?.errorMessage,
+    };
+    logRequestEnd(details);
+    if (request.method !== "OPTIONS" && reply.statusCode >= 400) {
+      logBlock("[ERROR]", details, { category: "error" });
+    }
   });
 
   app.addHook("onError", async (request, _reply, error) => {
     if (shouldSkip(request.url)) return;
-    logRequestEnd({
-      method: request.method,
-      url: request.url,
-      error: error?.message,
-      requestId: request.requestId,
-    });
+    if (request.logContext) {
+      request.logContext.errorMessage = error?.message || "Request error";
+    }
   });
 }
 

@@ -100,12 +100,8 @@ exports.getChannels = async (req, reply) => {
 
 exports.getStoreOptimizationSettings = async (req, reply) => {
   const store_hash = req.storeHash;
-  const channelId = Number(req.query?.channel_id) || 1;
 
-  const doc = await StoreOptimizationSettings.findOne({
-    store_hash,
-    channel_id: channelId,
-  }).lean();
+  const doc = await StoreOptimizationSettings.findOne({ store_hash }).lean();
 
   if (!doc) {
     return reply.send({
@@ -123,7 +119,6 @@ exports.getStoreOptimizationSettings = async (req, reply) => {
 };
 
 const ALLOWED_KEYS = new Set([
-  "channel_id",
   "optimization_mode",
   "optimize_image_enabled",
   "is_filename_template_enabled",
@@ -138,16 +133,13 @@ const ALLOWED_KEYS = new Set([
 exports.upsertStoreOptimizationSettings = async (req, reply) => {
   const store_hash = req.storeHash;
   const body = req.body || {};
-  const channelId = Number(body.channel_id) || 1;
 
   const $set = {
     user_id: req.currentUser?._id,
     store_hash,
-    channel_id: channelId,
   };
   for (const key of ALLOWED_KEYS) {
     if (!Object.prototype.hasOwnProperty.call(body, key)) continue;
-    if (key === "channel_id") continue;
     if (key === "product_sort_direction") {
       $set[key] = body[key] === "desc" ? "desc" : "asc";
       continue;
@@ -176,7 +168,7 @@ exports.upsertStoreOptimizationSettings = async (req, reply) => {
   }
 
   const doc = await StoreOptimizationSettings.findOneAndUpdate(
-    { store_hash, channel_id: channelId },
+    { store_hash },
     { $set },
     {
       upsert: true,

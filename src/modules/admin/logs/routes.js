@@ -4,6 +4,7 @@ const {
   listLogs,
   getLogTrace,
   getRecentErrorLogs,
+  listSystemErrorLogs,
 } = require("./controller");
 const {
   getLogsSummarySchema,
@@ -11,6 +12,7 @@ const {
   listLogsSchema,
   getLogTraceSchema,
   getRecentErrorLogsSchema,
+  listSystemErrorLogsSchema,
 } = require("./schemas");
 
 async function logsRoutes(app) {
@@ -20,6 +22,11 @@ async function logsRoutes(app) {
     "/recent-errors",
     { schema: getRecentErrorLogsSchema },
     getRecentErrorLogs
+  );
+  app.get(
+    "/system-errors",
+    { schema: listSystemErrorLogsSchema },
+    listSystemErrorLogs
   );
   app.get("/", { schema: listLogsSchema }, listLogs);
   app.get("/trace/:source/:traceId", { schema: getLogTraceSchema }, getLogTrace);

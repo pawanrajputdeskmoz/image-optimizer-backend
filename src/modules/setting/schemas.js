@@ -41,9 +41,8 @@ const getChannelsSchema = {
 const getStoreOptimizationSettingsSchema = {
   querystring: {
     type: "object",
-    properties: {
-      channel_id: { type: ["integer", "string"] },
-    },
+    additionalProperties: true,
+    properties: {},
   },
   response: {
     200: {
@@ -64,9 +63,6 @@ const upsertStoreOptimizationSettingsSchema = {
     type: "object",
     additionalProperties: true,
     properties: {
-      channel_id: {
-        type: ["integer", "string"],
-      },
       optimization_mode: {
         type: "string",
         enum: ["optimize_and_alt", "optimize_only", "alt_only"],
@@ -290,7 +286,6 @@ const getClientDashboardStatsSchema = {
               properties: {
                 product: { type: "boolean" },
                 category: { type: "boolean" },
-                brand: { type: "boolean" },
               },
             },
             active_bulk_restores: {
@@ -298,7 +293,6 @@ const getClientDashboardStatsSchema = {
               properties: {
                 product: { type: "boolean" },
                 category: { type: "boolean" },
-                brand: { type: "boolean" },
               },
             },
           },

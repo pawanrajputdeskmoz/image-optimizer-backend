@@ -1,27 +1,25 @@
 const User = require("../../../models/User");
 const ImageStatus = require("../../../models/ImageStatus");
 const CategoryImageStatus = require("../../../models/CategoryImageStatus");
-const BrandImageStatus = require("../../../models/BrandImageStatus");
 const ImageJobItem = require("../../../models/ImageJobItem");
 const CategoryJobItem = require("../../../models/CategoryJobItem");
-const BrandJobItem = require("../../../models/BrandJobItem");
 const StoreImageStat = require("../../../models/StoreImageStat");
+const ClientPlan = require("../../../models/ClientPlan");
+const PaymentHistory = require("../../../models/PaymentHistory");
 const {
   getWorkerStatusSummary,
 } = require("../workers/service");
-const {
-  checkMongoHealth,
-  checkRedisHealth,
-} = require("../health/service");
 
 const OPTIMIZED_JOB_STATUSES = ["optimized", "metadata_updated"];
 const TREND_WINDOW_DAYS = 7;
+const STORAGE_TREND_WINDOW_DAYS = 15;
 
-function getDayBoundaries() {
+function getDayBoundaries(windowDays = TREND_WINDOW_DAYS) {
   const days = [];
   const now = new Date();
+  const totalDays = Math.max(1, Number(windowDays) || TREND_WINDOW_DAYS);
 
-  for (let offset = TREND_WINDOW_DAYS - 1; offset >= 0; offset -= 1) {
+  for (let offset = totalDays - 1; offset >= 0; offset -= 1) {
     const start = new Date(now);
     start.setHours(0, 0, 0, 0);
     start.setDate(start.getDate() - offset);
@@ -39,10 +37,11 @@ function getDayBoundaries() {
   return days;
 }
 
-function getTrendWindowStart() {
+function getTrendWindowStart(windowDays = TREND_WINDOW_DAYS) {
+  const totalDays = Math.max(1, Number(windowDays) || TREND_WINDOW_DAYS);
   const start = new Date();
   start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - (TREND_WINDOW_DAYS - 1));
+  start.setDate(start.getDate() - (totalDays - 1));
   return start;
 }
 
@@ -74,6 +73,20 @@ function formatStorageDisplay(bytes) {
   return `${n} B`;
 }
 
+function formatMoneyDisplay(amount, currency = "USD") {
+  const value = Number(amount) || 0;
+  const code = String(currency || "USD").toUpperCase();
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: code,
+      maximumFractionDigits: 2,
+    }).format(value);
+  } catch {
+    return `${value.toFixed(2)} ${code}`;
+  }
+}
+
 function formatBytesDisplay(bytes) {
   const n = Number(bytes) || 0;
   if (n >= 1024 ** 3) {
@@ -88,14 +101,7 @@ function formatBytesDisplay(bytes) {
   return `${n} B`;
 }
 
-function serviceStatusLabel(ok) {
-  return {
-    status: ok ? "ok" : "error",
-    label: ok ? "Ok" : "Error",
-  };
-}
-
-function buildTrend(current, previous) {
+function buildTrend(current, previous, label = "vs previous 7 days") {
   const currentValue = Number(current) || 0;
   const previousValue = Number(previous) || 0;
 
@@ -104,7 +110,7 @@ function buildTrend(current, previous) {
     return {
       direction: currentValue > 0 ? "up" : "neutral",
       percent,
-      label: "vs previous 7 days",
+      label,
     };
   }
 
@@ -112,7 +118,7 @@ function buildTrend(current, previous) {
   return {
     direction: change > 0 ? "up" : change < 0 ? "down" : "neutral",
     percent: Number(Math.abs(change).toFixed(1)),
-    label: "vs previous 7 days",
+    label,
   };
 }
 
@@ -206,30 +212,30 @@ function buildStorageSavedTrendChart(dayLabels, dailySavedMap) {
     };
   });
   const totalInWindow = points.reduce((sum, row) => sum + row.bytes, 0);
+  const windowDays = dayLabels.length || STORAGE_TREND_WINDOW_DAYS;
 
   return {
     unit: "bytes",
     labels: dayLabels,
     values: points.map((row) => row.bytes),
     points,
+    window_days: windowDays,
     total_in_window: totalInWindow,
     total_in_window_display: formatStorageDisplay(totalInWindow),
-    summary_label: `${formatStorageDisplay(totalInWindow)} saved in last 7 days`,
+    summary_label: `${formatStorageDisplay(totalInWindow)} saved in last ${windowDays} days`,
   };
 }
 
-function buildOptimizationByTypeChart(productCount, categoryCount, brandCount) {
+function buildOptimizationByTypeChart(productCount, categoryCount) {
   const chart = buildSegments([
     { key: "product", label: "Product", value: productCount, color: "green" },
     { key: "category", label: "Category", value: categoryCount, color: "orange" },
-    { key: "brand", label: "Brand", value: brandCount, color: "blue" },
   ]);
 
   return {
     unit: "images",
     product_images: productCount,
     category_images: categoryCount,
-    brand_images: brandCount,
     summary_label: `${chart.total.toLocaleString("en-US")} optimized images by type`,
     total: chart.total,
     segments: chart.segments,
@@ -237,14 +243,13 @@ function buildOptimizationByTypeChart(productCount, categoryCount, brandCount) {
 }
 
 async function getMergedJobItemStatusMap() {
-  const [productRows, categoryRows, brandRows] = await Promise.all([
+  const [productRows, categoryRows] = await Promise.all([
     ImageJobItem.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
     CategoryJobItem.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
-    BrandJobItem.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
   ]);
 
   const statusMap = {};
-  for (const rows of [productRows, categoryRows, brandRows]) {
+  for (const rows of [productRows, categoryRows]) {
     for (const row of rows) {
       if (!row?._id) continue;
       statusMap[row._id] = (statusMap[row._id] || 0) + (row.count || 0);
@@ -286,6 +291,103 @@ async function buildUserSparkline(matchBase) {
   return days.map((_, index) => result[`day_${index}`][0]?.count || 0);
 }
 
+function payingPlanFilter(asOfDate = null) {
+  const filter = {
+    base_plan_slug: { $nin: ["free", null, ""] },
+    subscription_status: "active",
+  };
+  if (asOfDate) {
+    filter.$or = [
+      { started_at: { $lte: asOfDate } },
+      { started_at: null, created_at: { $lte: asOfDate } },
+    ];
+  }
+  return filter;
+}
+
+async function countPayingStores(asOfDate = null) {
+  const plans = await ClientPlan.find(payingPlanFilter(asOfDate))
+    .select({ store_hash: 1 })
+    .lean();
+  const hashes = plans.map((row) => row.store_hash).filter(Boolean);
+  if (!hashes.length) return 0;
+  return User.countDocuments({
+    ...activeStoreMatch(asOfDate),
+    store_hash: { $in: hashes },
+  });
+}
+
+async function buildPayingStoreSparkline() {
+  const days = getDayBoundaries();
+  const counts = await Promise.all(days.map((day) => countPayingStores(day.end)));
+  return counts;
+}
+
+/** Completed charges only. Subscription id rows (I-...) are not money captures. */
+function revenueChargeMatch(paidBefore = null) {
+  const match = {
+    status: "COMPLETED",
+    transaction_id: { $type: "string", $gt: "" },
+  };
+  if (paidBefore) {
+    match.paid_at = { $lte: paidBefore };
+  }
+  return match;
+}
+
+async function sumRevenue(paidBefore = null) {
+  const [row] = await PaymentHistory.aggregate([
+    { $match: revenueChargeMatch(paidBefore) },
+    { $group: { _id: null, amount: { $sum: "$amount" }, currency: { $first: "$currency" } } },
+  ]);
+  return {
+    amount: Number(row?.amount) || 0,
+    currency: row?.currency || "USD",
+  };
+}
+
+async function sumRevenueBetween(from, to) {
+  const paidAt = {};
+  if (from) paidAt.$gte = from;
+  if (to) paidAt.$lt = to;
+  const [row] = await PaymentHistory.aggregate([
+    {
+      $match: {
+        ...revenueChargeMatch(),
+        paid_at: paidAt,
+      },
+    },
+    { $group: { _id: null, amount: { $sum: "$amount" }, currency: { $first: "$currency" } } },
+  ]);
+  return {
+    amount: Number(row?.amount) || 0,
+    currency: row?.currency || "USD",
+  };
+}
+
+async function getDailyRevenue(since) {
+  const rows = await PaymentHistory.aggregate([
+    {
+      $match: {
+        ...revenueChargeMatch(),
+        paid_at: { $gte: since, $ne: null },
+      },
+    },
+    {
+      $group: {
+        _id: { $dateToString: { format: "%Y-%m-%d", date: "$paid_at" } },
+        amount: { $sum: "$amount" },
+      },
+    },
+  ]);
+  const map = new Map();
+  for (const row of rows) {
+    if (!row?._id) continue;
+    map.set(row._id, Number(row.amount) || 0);
+  }
+  return map;
+}
+
 async function buildActiveStoreSparkline() {
   const days = getDayBoundaries();
   const facet = {};
@@ -313,13 +415,12 @@ async function getDailyOptimizedCounts(since) {
     },
   };
 
-  const [product, category, brand] = await Promise.all([
+  const [product, category] = await Promise.all([
     ImageStatus.aggregate([{ $match: match }, group]),
     CategoryImageStatus.aggregate([{ $match: match }, group]),
-    BrandImageStatus.aggregate([{ $match: match }, group]),
   ]);
 
-  return mergeDailyCounts([product, category, brand]);
+  return mergeDailyCounts([product, category]);
 }
 
 async function getDailySavedBytes(since) {
@@ -335,13 +436,12 @@ async function getDailySavedBytes(since) {
     },
   };
 
-  const [product, category, brand] = await Promise.all([
+  const [product, category] = await Promise.all([
     ImageJobItem.aggregate([{ $match: match }, group]),
     CategoryJobItem.aggregate([{ $match: match }, group]),
-    BrandJobItem.aggregate([{ $match: match }, group]),
   ]);
 
-  return mergeDailyBytes([product, category, brand]);
+  return mergeDailyBytes([product, category]);
 }
 
 function buildMetricCard({
@@ -352,13 +452,14 @@ function buildMetricCard({
   previousValue,
   sparkline,
   color,
+  trendLabel = "vs previous 7 days",
 }) {
   return {
     key,
     label,
     value,
     value_formatted: valueFormatted,
-    trend: buildTrend(value, previousValue),
+    trend: buildTrend(value, previousValue, trendLabel),
     sparkline,
     color,
   };
@@ -369,82 +470,38 @@ exports.getDashboardCards = async () => {
   const dayLabels = dayBoundaries.map((day) => day.date);
   const trendWindowStart = getTrendWindowStart();
   const sevenDaysAgoEnd = dayBoundaries[0]?.end || trendWindowStart;
-
-  const optimizedMatch = {
-    status: "optimized",
-    optimized_at: { $gte: trendWindowStart, $ne: null },
-  };
-  const savedMatch = {
-    status: { $in: OPTIMIZED_JOB_STATUSES },
-    completed_at: { $gte: trendWindowStart, $ne: null },
-    saved_bytes: { $gt: 0 },
-  };
-  const savedGroup = { $group: { _id: null, bytes: { $sum: "$saved_bytes" } } };
+  const monthStart = getTrendWindowStart(30);
+  const previousMonthStart = getTrendWindowStart(60);
+  const monthDays = getDayBoundaries(30);
+  const monthLabels = monthDays.map((day) => day.date);
 
   const [
-    aggregateStats,
     totalClients,
     clientsSevenDaysAgo,
-    activeStores,
-    activeStoresSevenDaysAgo,
+    payingStores,
+    payingStoresSevenDaysAgo,
     clientSparkline,
-    activeStoreSparkline,
-    dailyOptimizedMap,
-    dailySavedMap,
-    productOptimized7d,
-    categoryOptimized7d,
-    brandOptimized7d,
-    productSaved7d,
-    categorySaved7d,
-    brandSaved7d,
+    payingStoreSparkline,
+    revenueNow,
+    revenueSevenDaysAgo,
+    dailyRevenueMap,
+    monthlyRevenue,
+    previousMonthlyRevenue,
+    monthlyDailyRevenueMap,
   ] = await Promise.all([
-    StoreImageStat.aggregate([
-      {
-        $group: {
-          _id: null,
-          optimized_images: { $sum: "$optimized_images" },
-          total_saved_bytes: { $sum: "$total_saved_bytes" },
-        },
-      },
-    ]),
     User.countDocuments(),
     User.countDocuments({ created_at: { $lte: sevenDaysAgoEnd } }),
-    User.countDocuments(activeStoreMatch()),
-    User.countDocuments(activeStoreMatch(sevenDaysAgoEnd)),
+    countPayingStores(),
+    countPayingStores(sevenDaysAgoEnd),
     buildUserSparkline({}),
-    buildActiveStoreSparkline(),
-    getDailyOptimizedCounts(trendWindowStart),
-    getDailySavedBytes(trendWindowStart),
-    ImageStatus.countDocuments(optimizedMatch),
-    CategoryImageStatus.countDocuments(optimizedMatch),
-    BrandImageStatus.countDocuments(optimizedMatch),
-    ImageJobItem.aggregate([{ $match: savedMatch }, savedGroup]),
-    CategoryJobItem.aggregate([{ $match: savedMatch }, savedGroup]),
-    BrandJobItem.aggregate([{ $match: savedMatch }, savedGroup]),
+    buildPayingStoreSparkline(),
+    sumRevenue(),
+    sumRevenue(sevenDaysAgoEnd),
+    getDailyRevenue(trendWindowStart),
+    sumRevenueBetween(monthStart, null),
+    sumRevenueBetween(previousMonthStart, monthStart),
+    getDailyRevenue(monthStart),
   ]);
-
-  const optimizedInLast7Days =
-    productOptimized7d + categoryOptimized7d + brandOptimized7d;
-  const savedBytesInLast7Days =
-    (productSaved7d[0]?.bytes || 0) +
-    (categorySaved7d[0]?.bytes || 0) +
-    (brandSaved7d[0]?.bytes || 0);
-
-  const statTotals = aggregateStats[0] || {
-    optimized_images: 0,
-    total_saved_bytes: 0,
-  };
-
-  const totalOptimizedImages = Number(statTotals.optimized_images) || 0;
-  const totalSavedBytes = Number(statTotals.total_saved_bytes) || 0;
-  const previousOptimizedImages = Math.max(
-    0,
-    totalOptimizedImages - optimizedInLast7Days
-  );
-  const previousSavedBytes = Math.max(
-    0,
-    totalSavedBytes - savedBytesInLast7Days
-  );
 
   const cards = [
     buildMetricCard({
@@ -457,39 +514,43 @@ exports.getDashboardCards = async () => {
       color: "purple",
     }),
     buildMetricCard({
-      key: "active_stores",
-      label: "Active Stores",
-      value: activeStores,
-      valueFormatted: formatCountDisplay(activeStores),
-      previousValue: activeStoresSevenDaysAgo,
-      sparkline: activeStoreSparkline,
+      key: "paying_stores",
+      label: "Paying Stores",
+      value: payingStores,
+      valueFormatted: formatCountDisplay(payingStores),
+      previousValue: payingStoresSevenDaysAgo,
+      sparkline: payingStoreSparkline,
       color: "blue",
     }),
     buildMetricCard({
-      key: "total_optimized_images",
-      label: "Total Optimized Images",
-      value: totalOptimizedImages,
-      valueFormatted: formatCountDisplay(totalOptimizedImages),
-      previousValue: previousOptimizedImages,
+      key: "total_revenue",
+      label: "Total Revenue",
+      value: revenueNow.amount,
+      valueFormatted: formatMoneyDisplay(revenueNow.amount, revenueNow.currency),
+      previousValue: revenueSevenDaysAgo.amount,
       sparkline: buildCumulativeSparkline(
         dayLabels,
-        dailyOptimizedMap,
-        totalOptimizedImages
+        dailyRevenueMap,
+        revenueNow.amount
       ),
       color: "green",
     }),
     buildMetricCard({
-      key: "storage_saved",
-      label: "Storage Saved",
-      value: totalSavedBytes,
-      valueFormatted: formatStorageDisplay(totalSavedBytes),
-      previousValue: previousSavedBytes,
+      key: "monthly_revenue",
+      label: "Monthly Revenue",
+      value: monthlyRevenue.amount,
+      valueFormatted: formatMoneyDisplay(
+        monthlyRevenue.amount,
+        monthlyRevenue.currency || revenueNow.currency
+      ),
+      previousValue: previousMonthlyRevenue.amount,
       sparkline: buildCumulativeSparkline(
-        dayLabels,
-        dailySavedMap,
-        totalSavedBytes
+        monthLabels,
+        monthlyDailyRevenueMap,
+        monthlyRevenue.amount
       ),
       color: "orange",
+      trendLabel: "vs previous 30 days",
     }),
   ];
 
@@ -500,62 +561,24 @@ exports.getDashboardCards = async () => {
 };
 
 exports.getDashboardStats = async () => {
-  const dayBoundaries = getDayBoundaries();
+  const dayBoundaries = getDayBoundaries(STORAGE_TREND_WINDOW_DAYS);
   const dayLabels = dayBoundaries.map((day) => day.date);
-  const trendWindowStart = getTrendWindowStart();
+  const trendWindowStart = getTrendWindowStart(STORAGE_TREND_WINDOW_DAYS);
 
-  const [mongodb, redis, aggregateStats, jobItemStatusMap, dailySavedMap, productOptimized, categoryOptimized, brandOptimized, totalClients, activeStores, workerSummary] =
+  const [jobItemStatusMap, dailySavedMap, productOptimized, categoryOptimized, workerSummary] =
     await Promise.all([
-      checkMongoHealth(),
-      checkRedisHealth(),
-      StoreImageStat.aggregate([
-        {
-          $group: {
-            _id: null,
-            optimized_images: { $sum: "$optimized_images" },
-            total_saved_bytes: { $sum: "$total_saved_bytes" },
-            total_original_size: { $sum: "$total_original_size" },
-            average_saving_percent: { $avg: "$average_saving_percent" },
-          },
-        },
-      ]),
       getMergedJobItemStatusMap(),
       getDailySavedBytes(trendWindowStart),
       ImageStatus.countDocuments({ status: "optimized" }),
       CategoryImageStatus.countDocuments({ status: "optimized" }),
-      BrandImageStatus.countDocuments({ status: "optimized" }),
-      User.countDocuments(),
-      User.countDocuments(activeStoreMatch()),
       getWorkerStatusSummary(),
     ]);
-
-  const statTotals = aggregateStats[0] || {
-    optimized_images: 0,
-    total_saved_bytes: 0,
-    total_original_size: 0,
-    average_saving_percent: 0,
-  };
-
-  const optimizedImages = Number(statTotals.optimized_images) || 0;
-  const totalSavedBytes = Number(statTotals.total_saved_bytes) || 0;
-  const avgSavingPercent =
-    statTotals.average_saving_percent != null
-      ? Number(Number(statTotals.average_saving_percent).toFixed(1))
-      : statTotals.total_original_size > 0
-        ? Number(
-            (
-              (totalSavedBytes / Number(statTotals.total_original_size)) *
-              100
-            ).toFixed(1)
-          )
-        : 0;
 
   const imageOptimization = buildImageOptimizationChart(jobItemStatusMap);
   const storageSavedTrend = buildStorageSavedTrendChart(dayLabels, dailySavedMap);
   const optimizationByType = buildOptimizationByTypeChart(
     productOptimized,
-    categoryOptimized,
-    brandOptimized
+    categoryOptimized
   );
   const workerStatusChart = buildSegments([
     { key: "running", label: "Running", value: workerSummary.running, color: "green" },
@@ -565,8 +588,6 @@ exports.getDashboardStats = async () => {
   ]);
 
   const cards = {
-    total_clients: totalClients,
-    active_stores: activeStores,
     total_workers: workerSummary.total_workers,
     running: workerSummary.running,
     stopped: workerSummary.stopped,
@@ -575,14 +596,6 @@ exports.getDashboardStats = async () => {
     pending_jobs: workerSummary.pending_jobs,
     failed_jobs: workerSummary.failed_jobs,
     workers: workerSummary,
-    optimized_images: optimizedImages,
-    total_saved: {
-      bytes: totalSavedBytes,
-      value: formatBytesDisplay(totalSavedBytes),
-      average_saving_percent: avgSavingPercent,
-    },
-    redis: serviceStatusLabel(redis.ok),
-    database: serviceStatusLabel(mongodb.ok),
   };
 
   const charts = {

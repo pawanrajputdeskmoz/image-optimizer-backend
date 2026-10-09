@@ -30,6 +30,7 @@ const {
   normalizeUploadDescription,
   fetchProductImageById,
 } = require("./bigCommerceProductImage");
+const { resolveChannelId } = require("../../../utils/channelContext");
 
 async function logCompressActivity(
   logContext,
@@ -76,11 +77,16 @@ exports.compressImage = async ({
   productId,
   imageUrl,
   settings,
+  channelId = 1,
   imageMeta = {},
   logContext = null,
   skipQuotaCheck = false,
 }) => {
   let userId = logContext?.userId || null;
+  const resolvedChannelId = resolveChannelId(
+    channelId ?? logContext?.channelId,
+    1
+  );
   if (!skipQuotaCheck && storeHash) {
     const User = require("../../../models/User");
     const {
@@ -342,6 +348,7 @@ exports.compressImage = async ({
       {
         $set: {
           ...(userId ? { user_id: userId } : {}),
+          channel_id: resolvedChannelId,
           bigcommerce_image_url: imageUrl,
           original_image_path: filePath,
           optimization_type: optimizationType,
@@ -357,6 +364,7 @@ exports.compressImage = async ({
         {
           $set: {
             ...(userId ? { user_id: userId } : {}),
+            channel_id: resolvedChannelId,
             image_optimization_id: imageOptimizationDoc._id,
             status: "optimizing",
             image_update_status: "processing",
@@ -471,6 +479,7 @@ exports.compressImage = async ({
         { store_hash: storeHash, product_id: productId, image_id: imageId },
         {
           $set: {
+            channel_id: resolvedChannelId,
             status: "pending",
             image_update_status: "idle",
           },
@@ -667,6 +676,7 @@ exports.compressImage = async ({
         {
           $set: {
             image_id: newImageId,
+            channel_id: resolvedChannelId,
             status: "optimized",
             image_update_status: "complete",
             optimized_at: new Date(),
@@ -764,7 +774,13 @@ exports.compressImage = async ({
     try {
       await ImageStatus.updateOne(
         { store_hash: storeHash, product_id: productId, image_id: imageId },
-        { $set: { status: "failed", image_update_status: "failed" } },
+        {
+          $set: {
+            channel_id: resolvedChannelId,
+            status: "failed",
+            image_update_status: "failed",
+          },
+        },
         { upsert: true }
       );
       await StoreImageStat.updateOne(

@@ -111,6 +111,91 @@ async function saveSubscriptionPayment({
 }
 
 /**
+ * Persist a real PayPal charge (sale/capture) transaction id for a store.
+ * One row per transaction_id — not the subscription id.
+ */
+async function saveTransactionPayment({
+  storeHash = null,
+  subscriptionId = null,
+  transactionId = null,
+  amount = null,
+  currency = null,
+  payerEmail = null,
+  paidAt = null,
+  paypalResponse = null,
+}) {
+  const txnId = trim(transactionId);
+  if (!txnId) return null;
+
+  let resolvedStoreHash = trim(storeHash);
+  let clientPlan = null;
+
+  if (subscriptionId) {
+    clientPlan = await findClientPlan({
+      storeHash: resolvedStoreHash,
+      subscriptionId,
+    });
+    if (!resolvedStoreHash) {
+      resolvedStoreHash = clientPlan?.store_hash || null;
+    }
+  } else if (resolvedStoreHash) {
+    clientPlan = await findClientPlan({ storeHash: resolvedStoreHash });
+  }
+
+  if (!resolvedStoreHash) return null;
+
+  const plan = await resolvePlan(
+    clientPlan?.paypal_plan_id || null,
+    clientPlan?.base_plan_slug || null
+  );
+
+  const paidAtDate = paidAt ? new Date(paidAt) : new Date();
+  const resolvedAmount =
+    amount != null && Number.isFinite(Number(amount))
+      ? Number(amount)
+      : Number(plan?.price) || 0;
+  const resolvedCurrency =
+    trim(currency)?.toUpperCase() || plan?.currency || "USD";
+
+  await PaymentHistory.findOneAndUpdate(
+    { transaction_id: txnId },
+    {
+      $set: {
+        store_hash: resolvedStoreHash,
+        plan_id: plan?._id || plan?.id || clientPlan?.plan_id || null,
+        plan_slug: plan?.slug || clientPlan?.base_plan_slug || "unknown",
+        plan_name: plan?.name || clientPlan?.base_plan_slug || "Unknown",
+        amount: resolvedAmount,
+        currency: resolvedCurrency,
+        status: "COMPLETED",
+        payment_method: "PAYPAL_SUBSCRIPTION",
+        capture_id: txnId,
+        transaction_id: txnId,
+        payer_email: payerEmail || null,
+        paid_at: Number.isNaN(paidAtDate.getTime()) ? new Date() : paidAtDate,
+        ...(paypalResponse ? { paypal_response: paypalResponse } : {}),
+      },
+      $setOnInsert: {
+        paypal_order_id: txnId,
+      },
+    },
+    { upsert: true }
+  );
+
+  return { storeHash: resolvedStoreHash, transactionId: txnId };
+}
+
+function parseSaleAmount(resource = {}) {
+  const amount = resource.amount || {};
+  const total = amount.total ?? amount.value ?? null;
+  const currency = amount.currency || amount.currency_code || null;
+  return {
+    amount: total != null ? Number(total) : null,
+    currency: trim(currency),
+  };
+}
+
+/**
  * Cancel a PayPal billing subscription.
  * 204 = cancelled; 404 / already-cancelled statuses are treated as success.
  */
@@ -461,11 +546,45 @@ exports.handlePaypalWebhook = async (headers, event) => {
     }
 
     const resource = event.resource || {};
+    const eventType = event.event_type;
+
+    // Charge transaction ids (sale/capture) — not subscription lifecycle ids.
+    if (
+      eventType === "PAYMENT.SALE.COMPLETED" ||
+      eventType === "PAYMENT.CAPTURE.COMPLETED"
+    ) {
+      const transactionId = trim(resource.id);
+      const subscriptionId = trim(resource.billing_agreement_id);
+      const storeHash = trim(resource.custom_id || resource.custom);
+      const { amount, currency } = parseSaleAmount(resource);
+      const payerEmail =
+        resource.payer?.email_address ||
+        resource.subscriber?.email_address ||
+        null;
+      const paidAt =
+        resource.create_time ||
+        resource.update_time ||
+        event.create_time ||
+        null;
+
+      await saveTransactionPayment({
+        storeHash,
+        subscriptionId,
+        transactionId,
+        amount,
+        currency,
+        payerEmail,
+        paidAt,
+        paypalResponse: resource,
+      });
+
+      return { error: null, received: true };
+    }
+
     const storeHash = trim(resource.custom_id);
     const subscriptionId = trim(resource.id);
     const paypalPlanId = trim(resource.plan_id);
     const payerEmail = resource.subscriber?.email_address || null;
-    const eventType = event.event_type;
 
     if (!subscriptionId && !storeHash) {
       return { error: null, received: true };
@@ -565,6 +684,7 @@ exports.listPaymentHistory = async (storeHash) => {
     payment_method: row.payment_method,
     paypal_order_id: row.paypal_order_id,
     capture_id: row.capture_id,
+    transaction_id: row.transaction_id || row.capture_id || null,
     payer_email: row.payer_email,
     paid_at: row.paid_at,
     created_at: row.created_at,

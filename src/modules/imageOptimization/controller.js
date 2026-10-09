@@ -1011,8 +1011,8 @@ exports.singleImageOptimization = async (req, reply) => {
     }
 
     await registerPendingProductImages(storeHash, [
-      { product_id: productId, image_id: imageId },
-    ], req.currentUser?._id);
+      { product_id: productId, image_id: imageId, channel_id: channelId },
+    ], req.currentUser?._id, channelId);
 
     const planLimitReply = await replyIfMonthlyPlanLimitExceeded(
       reply,
@@ -1030,6 +1030,7 @@ exports.singleImageOptimization = async (req, reply) => {
       productId,
       imageUrl,
       settings,
+      channelId,
       imageMeta: {
         oldImageName,
         oldAltText,
@@ -1191,6 +1192,7 @@ exports.bulkImageOptimization = async (req, reply) => {
       user_id: req.currentUser?._id,
       job_uuid: jobUuid,
       store_hash: storeHash,
+      channel_id: channelId,
       job_type: "bulk",
       total_images: 0,
       queued_images: 0,
@@ -1798,6 +1800,7 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
           jobItems.push({
             job_uuid: jobUuid,
             store_hash: storeHash,
+            channel_id: channelId,
             job_type: jobType,
             product_id: Number(productId),
             image_id: Number(imageId),
@@ -1857,6 +1860,7 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
       jobItems.push({
         job_uuid: jobUuid,
         store_hash: storeHash,
+        channel_id: channelId,
         job_type: jobType,
         product_id: Number(productId),
         image_id: Number(imageId),
@@ -1873,6 +1877,7 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
         optimization_status:
           item.optimization_status || item.status || null,
         placementSource: item,
+        channelId,
       });
     }
 
@@ -1928,6 +1933,7 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
       queuedImages: toQueue.length,
       skippedImages: skipped.length,
       jobItems,
+      channelId,
       totalBatches: useBatchQueue
         ? getOptimizationBatchCount(toQueue.length, optimizationBatchSize)
         : 0,
@@ -1972,6 +1978,7 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
           estimatedImages: toQueue.length,
           suppressHeavyWake: true,
           selectedPlan: planSlug,
+          channelId,
         });
 
       if (batchQueueError) {
@@ -2039,6 +2046,7 @@ async function queueBulkImageJobs(req, reply, jobType, itemsOverride = null) {
             optimization_status: entry.optimization_status,
             settings,
             imageMeta: entry.imageMeta,
+            channelId: entry.channelId || channelId,
           },
           {},
           routing

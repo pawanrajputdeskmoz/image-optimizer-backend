@@ -60,6 +60,7 @@ async function startWorker() {
         storeHash,
         accessToken,
         storeUrl,
+        channelId,
         maxQueueImages,
         includeOptimized: false,
         productSortDirection:
@@ -130,6 +131,7 @@ async function startWorker() {
         estimatedImages: queuedImages,
         suppressHeavyWake: false,
         selectedPlan: resolvedPlanSlug,
+        channelId,
       });
 
       if (queueError) {

@@ -22,6 +22,7 @@ const listLogsSchema = {
       trace_id: { type: "string" },
       log_type: { type: "string", enum: ["info", "warning", "error"] },
       step: { type: "string" },
+      date: { type: "string" },
     },
   },
   response: { 200: successEnvelope },
@@ -37,6 +38,17 @@ const getLogTraceSchema = {
         enum: ["webhook", "category_webhook"],
       },
       traceId: { type: "string", minLength: 1 },
+    },
+  },
+  response: { 200: successEnvelope },
+};
+
+const listSystemErrorLogsSchema = {
+  querystring: {
+    ...paginationQuery,
+    properties: {
+      ...paginationQuery.properties,
+      date: { type: "string" },
     },
   },
   response: { 200: successEnvelope },
@@ -58,4 +70,5 @@ module.exports = {
   listLogsSchema,
   getLogTraceSchema,
   getRecentErrorLogsSchema,
+  listSystemErrorLogsSchema,
 };
