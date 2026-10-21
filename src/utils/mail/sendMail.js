@@ -55,11 +55,18 @@ async function sendMail({
     return { sent: false, skipped: true, reason: "NO_RECIPIENT" };
   }
 
-  const fromAddress =
+  const rawFrom =
     from ||
     process.env.EMAIL_FROM ||
     process.env.MAIL_FROM_EMAIL ||
-    undefined;
+    "noreply@seokart.com";
+  const fromName = (process.env.MAIL_FROM_NAME || "SEOKart Support").trim();
+  // SES / SMTP require a From; include display name when raw value is just an address.
+  const fromAddress = rawFrom.includes("<")
+    ? rawFrom
+    : fromName
+      ? `"${fromName.replace(/"/g, "")}" <${rawFrom}>`
+      : rawFrom;
 
   try {
     const info = await transporter.sendMail({

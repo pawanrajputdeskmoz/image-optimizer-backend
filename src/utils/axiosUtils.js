@@ -3,6 +3,11 @@ const http = require('http');
 const https = require('https');
 const config = require('../config');
 const { logCallApi, sanitize } = require('./fileLogger');
+const {
+  acquireBigCommerceApiSlot,
+  extractStoreHashFromUrl,
+  isBigCommerceApiUrl,
+} = require('./bcCatalogRateLimit');
 
 // Reuse TCP/TLS connections across sequential BigCommerce calls (upload,
 // metadata update, delete, verify, etc. all hit the same host back-to-back)
@@ -31,9 +36,15 @@ function summarizeData(data) {
   return sanitize(data);
 }
 
+async function throttleBigCommerceIfNeeded(url) {
+  if (!isBigCommerceApiUrl(url)) return;
+  await acquireBigCommerceApiSlot(extractStoreHashFromUrl(url));
+}
+
 function attachApiLogging(client) {
-  client.interceptors.request.use((reqConfig) => {
+  client.interceptors.request.use(async (reqConfig) => {
     reqConfig.metadata = { startedAt: Date.now() };
+    await throttleBigCommerceIfNeeded(reqConfig?.url);
     return reqConfig;
   });
 
@@ -88,6 +99,21 @@ function isRetryableError(error) {
   );
 }
 
+function retryDelayMs(error, attempt, baseDelayMs) {
+  if (error?.response?.status === 429) {
+    const retryAfter = error?.response?.headers?.['retry-after'];
+    const retryAfterSec = retryAfter != null ? Number(retryAfter) : NaN;
+    if (Number.isFinite(retryAfterSec) && retryAfterSec > 0) {
+      return Math.min(retryAfterSec * 1000, 30_000);
+    }
+    const base429 =
+      config.http.axios429RetryBaseDelayMs ??
+      Math.max(baseDelayMs, 1500);
+    return base429 * Math.pow(2, attempt);
+  }
+  return baseDelayMs * Math.pow(2, attempt);
+}
+
 async function withRetry(
   fn,
   {
@@ -104,7 +130,7 @@ async function withRetry(
     } catch (err) {
       if (attempt >= retries || !isRetryableError(err)) throw err;
 
-      const delay = baseDelayMs * Math.pow(2, attempt); // 250, 500...
+      const delay = retryDelayMs(err, attempt, baseDelayMs);
       attempt += 1;
       await sleep(delay);
     }
@@ -150,16 +176,19 @@ async function post(url, data, headers = {}, config = {}) {
 async function postFormData(url, form, headers = {}) {
   const startedAt = Date.now();
   try {
-    const response = await axios.post(url, form, {
-      timeout: config.http.axiosTimeoutMs,
-      headers: {
-        Accept: 'application/json',
-        ...headers,
-      },
-      maxBodyLength: Infinity,
-      maxContentLength: Infinity,
-      httpAgent,
-      httpsAgent,
+    const response = await withRetry(async () => {
+      await throttleBigCommerceIfNeeded(url);
+      return axios.post(url, form, {
+        timeout: config.http.axiosTimeoutMs,
+        headers: {
+          Accept: 'application/json',
+          ...headers,
+        },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        httpAgent,
+        httpsAgent,
+      });
     });
     logCallApi({
       method: 'POST',

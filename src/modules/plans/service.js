@@ -357,6 +357,11 @@ async function assignStorePlan(storeHash, planSlug, { assignedBy = "client" } = 
     plan.id
   );
 
+  if (!isPaidPlan) {
+    const { disableCruiseControlOnFreePlan } = require("../../utils/disableCruiseControlOnFreePlan");
+    await disableCruiseControlOnFreePlan(storeHash);
+  }
+
   return {
     error: null,
     user,
@@ -437,6 +442,11 @@ exports.upsertClientPlan = async (storeHash, payload = {}, assignedBy = null) =>
     exports.clearPausedPlanLimitJobs(storeHash),
   ]);
 
+  if (!isPaidPlan) {
+    const { disableCruiseControlOnFreePlan } = require("../../utils/disableCruiseControlOnFreePlan");
+    await disableCruiseControlOnFreePlan(storeHash);
+  }
+
   return {
     error: null,
     client_plan: formatClientPlan(clientPlanDoc),
@@ -485,6 +495,9 @@ exports.deleteClientPlan = async (storeHash) => {
     user?._id || null,
     freePlan?.id || null
   );
+
+  const { disableCruiseControlOnFreePlan } = require("../../utils/disableCruiseControlOnFreePlan");
+  await disableCruiseControlOnFreePlan(storeHash);
 
   const effectivePlan = await exports.getEffectivePlanForStore(storeHash, "free");
 

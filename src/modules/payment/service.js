@@ -6,6 +6,9 @@ const ClientPlan = require("../../models/ClientPlan");
 const { getPlanBySlug, upgradeStorePlan } = require("../plans/service");
 const { createPaypalBillingPlan } = require("../admin/plans/paypalBilling");
 const { syncCurrentMonthUsage } = require("../../utils/monthlyUsage");
+const {
+  queuePaymentNotificationEmail,
+} = require("../../utils/mail/sendPaymentNotificationEmail");
 
 let cachedToken = null;
 let tokenExpiresAt = 0;
@@ -145,6 +148,19 @@ async function saveTransactionPayment({
 
   if (!resolvedStoreHash) return null;
 
+  // Skip notify on webhook retries for the same transaction.
+  const alreadySaved = await PaymentHistory.findOne({ transaction_id: txnId })
+    .select({ _id: 1 })
+    .lean();
+
+  // First COMPLETED payment for this store = "new"; later ones = "recurring".
+  const priorCompleted = await PaymentHistory.countDocuments({
+    store_hash: resolvedStoreHash,
+    status: "COMPLETED",
+    transaction_id: { $ne: txnId },
+  });
+  const isRecurring = priorCompleted > 0;
+
   const plan = await resolvePlan(
     clientPlan?.paypal_plan_id || null,
     clientPlan?.base_plan_slug || null
@@ -183,7 +199,12 @@ async function saveTransactionPayment({
     { upsert: true }
   );
 
-  return { storeHash: resolvedStoreHash, transactionId: txnId };
+  return {
+    storeHash: resolvedStoreHash,
+    transactionId: txnId,
+    isRecurring,
+    shouldNotify: !alreadySaved,
+  };
 }
 
 function parseSaleAmount(resource = {}) {
@@ -328,6 +349,9 @@ async function applyCancelledSubscriptionLocally(storeHash, subscriptionId, payp
     null,
     freePlanId
   );
+
+  const { disableCruiseControlOnFreePlan } = require("../../utils/disableCruiseControlOnFreePlan");
+  await disableCruiseControlOnFreePlan(storeHash);
 }
 
 /**
@@ -528,6 +552,14 @@ exports.createSubscription = async (storeHash, planId) => {
       status: "pending",
     });
 
+    // Client clicked Pay — notify internal inbox (payment process started).
+    queuePaymentNotificationEmail({
+      storeHash,
+      kind: "visit",
+      platform: "Bigcommerce",
+      app: "Image Optimizer",
+    });
+
     const approvalUrl = data?.links?.find((l) => l.rel === "approve")?.href || null;
     return {
       error: null,
@@ -606,7 +638,7 @@ exports.handlePaypalWebhook = async (headers, event) => {
         event.create_time ||
         null;
 
-      await saveTransactionPayment({
+      const saved = await saveTransactionPayment({
         storeHash,
         subscriptionId,
         transactionId,
@@ -616,6 +648,17 @@ exports.handlePaypalWebhook = async (headers, event) => {
         paidAt,
         paypalResponse: resource,
       });
+
+      if (saved?.storeHash && saved.shouldNotify) {
+        queuePaymentNotificationEmail({
+          storeHash: saved.storeHash,
+          transactionId: saved.transactionId || transactionId,
+          clientEmail: payerEmail || null,
+          kind: saved.isRecurring ? "recurring" : "new",
+          platform: "Bigcommerce",
+          app: "Image Optimizer",
+        });
+      }
 
       return { error: null, received: true };
     }

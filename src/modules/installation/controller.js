@@ -286,8 +286,9 @@ exports.loadBigComApp = async (req, reply) => {
       });
     }
 
+    // Soft/skip exp like legacy signed_payload load: signature still verified.
     const decoded = verifySignedPayloadJwt(signed_payload_jwt, {
-      expiresIn: "2d",
+      ignoreExpiration: true,
     });
 
     const storeHash = decoded?.sub?.split("/")[1];

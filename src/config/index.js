@@ -64,10 +64,17 @@ module.exports = {
     axiosTimeoutMs: envInt("HTTP_AXIOS_TIMEOUT_MS", 20_000),
     axiosRetries: envInt("HTTP_AXIOS_RETRIES", 2),
     axiosRetryBaseDelayMs: envInt("HTTP_AXIOS_RETRY_BASE_DELAY_MS", 250),
+    /** Minimum backoff when BigCommerce returns 429 (Too Many Requests). */
+    axios429RetryBaseDelayMs: envInt("HTTP_AXIOS_429_RETRY_BASE_DELAY_MS", 1500),
   },
 
   api: {
     bigCommerceTimeoutMs: envInt("BIGCOMMERCE_API_TIMEOUT_MS", 10_000),
+    /**
+     * Max BigCommerce REST calls per second per store (all workers share via Redis).
+     * BC allows ~2 requests/sec — keep this at or below that to avoid 429s.
+     */
+    bcMaxRequestsPerSecond: envInt("BC_API_MAX_RPS", 2),
   },
 
   workers: {
@@ -125,7 +132,10 @@ module.exports = {
 
   catalog: {
     pageSize: envInt("CATALOG_PAGE_SIZE", 50),
-    /** Max BigCommerce catalog/products API calls per second during catalog fetch */
+    /**
+     * Legacy catalog-only RPS (fallback if BC_API_MAX_RPS unset).
+     * Prefer api.bcMaxRequestsPerSecond / BC_API_MAX_RPS for all BC calls.
+     */
     bcMaxRequestsPerSecond: envInt("CATALOG_FETCH_BC_MAX_RPS", 2),
   },
 
